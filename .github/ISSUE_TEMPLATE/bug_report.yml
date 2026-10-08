@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible import or plugin problem
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach proprietary source files without redistribution rights. Use a minimal sanitized fixture whenever possible.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Source format
+      options:
+        - PPTX
+        - PSD
+        - AI
+        - SVG
+        - PDF-compatible AI
+        - Plugin UI or renderer
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system and Figma Desktop version
+      placeholder: macOS 15.6, Figma Desktop 125.4
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open the plugin
+        2. Import ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result and import report
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Sanitized fixture
+      description: Drag a legally shareable minimal source file here, or provide a link.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: This report does not expose confidential or proprietary content.
+          required: true

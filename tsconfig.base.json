@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@easy-to-figma/ir-schema": ["packages/ir-schema/src/index.ts"],
+      "@easy-to-figma/parser-pptx": ["packages/parser-pptx/src/index.ts"],
+      "@easy-to-figma/parser-psd": ["packages/parser-psd/src/index.ts"],
+      "@easy-to-figma/parser-ai": ["packages/parser-ai/src/index.ts"],
+      "@easy-to-figma/figma-renderer": ["packages/figma-renderer/src/index.ts"]
+    }
+  }
+}

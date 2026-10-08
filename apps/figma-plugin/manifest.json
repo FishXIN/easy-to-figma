@@ -1,0 +1,12 @@
+{
+  "name": "Easy to Figma",
+  "id": "easy-to-figma-open-source",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "dist/index.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}

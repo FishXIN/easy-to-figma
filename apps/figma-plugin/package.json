@@ -1,0 +1,29 @@
+{
+  "name": "@easy-to-figma/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && esbuild src/code.ts --bundle --outfile=dist/code.js --target=es2017",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@easy-to-figma/figma-renderer": "*",
+    "@easy-to-figma/ir-schema": "*",
+    "@easy-to-figma/parser-ai": "*",
+    "@easy-to-figma/parser-pptx": "*",
+    "@easy-to-figma/parser-psd": "*",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "esbuild": "^0.25.4",
+    "vite": "^7.3.7",
+    "vite-plugin-singlefile": "^2.2.0"
+  }
+}

@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a format capability or workflow improvement
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - PPTX parser
+        - PSD parser
+        - AI / SVG parser
+        - Figma renderer
+        - Plugin UI
+        - IR schema
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the source content or workflow that cannot be handled today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the expected editable mapping and acceptable fallback.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: examples
+    attributes:
+      label: References or sanitized examples
+      description: Do not upload proprietary files without redistribution rights.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I described how unsupported content should degrade.
+          required: true
