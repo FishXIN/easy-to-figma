@@ -4,7 +4,7 @@ English | [简体中文](./README.md)
 
 [![CI](https://github.com/FishXIN/easy-to-figma/actions/workflows/ci.yml/badge.svg)](https://github.com/FishXIN/easy-to-figma/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-202328.svg)](./LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6.svg)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6.svg)](https://www.typescriptlang.org/)
 [![Figma Plugin](https://img.shields.io/badge/Figma-plugin-f24e1e.svg)](https://www.figma.com/plugin-docs/)
 
 **Bring PSD, Illustrator, and PowerPoint files into Figma while preserving as much editability as possible.**
