@@ -21,7 +21,7 @@
   "devDependencies": {
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
-    "@vitejs/plugin-react": "^4.4.1",
+    "@vitejs/plugin-react": "^6.1.2",
     "esbuild": "^0.25.4",
     "vite": "^7.3.7",
     "vite-plugin-singlefile": "^2.2.0"
