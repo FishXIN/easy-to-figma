@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@easy-to-figma/ir-schema": "*",
-    "@xmldom/xmldom": "^0.8.11",
+    "@xmldom/xmldom": "^0.9.12",
     "pdfjs-dist": "^6.4.299"
   }
 }
