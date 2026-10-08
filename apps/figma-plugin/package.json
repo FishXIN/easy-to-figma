@@ -14,7 +14,7 @@
     "@easy-to-figma/parser-ai": "*",
     "@easy-to-figma/parser-pptx": "*",
     "@easy-to-figma/parser-psd": "*",
-    "lucide-react": "^0.468.0",
+    "lucide-react": "^1.52.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
