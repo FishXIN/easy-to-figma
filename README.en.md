@@ -75,7 +75,7 @@ Read the [architecture](./docs/architecture.md), [IR schema](./docs/ir-schema.md
 
 ## Project Status
 
-Version `v0.1.0` establishes the complete import path for all three source families. Current work focuses on compatibility with more real-world files, more accurate text and transform mapping, and a broader public fixture suite.
+Version `v0.1.2` establishes the complete import path for all three source families and has been verified with two real Illustrator files up to 909 MB. Current work focuses on compatibility with more real-world files, more accurate text and transform mapping, and a broader public fixture suite.
 
 ## Contributing
 

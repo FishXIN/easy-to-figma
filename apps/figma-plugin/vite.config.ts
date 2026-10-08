@@ -29,10 +29,12 @@ function inlineFigmaUi(): Plugin {
           const scriptPattern = new RegExp(
             `<script[^>]+src=["'](?:\\./|/)?${filePattern}["'][^>]*></script>`,
           );
+          const inlineCode = output.code
+            .replaceAll("__VITE_PRELOAD__", "void 0")
+            .replaceAll("</script", "<\\/script");
           html = html.replace(
             scriptPattern,
-            () =>
-              `<script type="module">\n${output.code.replaceAll("</script", "<\\/script")}\n</script>`,
+            () => `<script type="module">\n${inlineCode}\n</script>`,
           );
           delete bundle[key];
         } else if (output.fileName.endsWith(".css")) {
@@ -45,6 +47,9 @@ function inlineFigmaUi(): Plugin {
           );
           delete bundle[key];
         }
+      }
+      if (html.includes("__VITE_PRELOAD__")) {
+        throw new Error("Vite emitted an unresolved preload marker in the inlined plugin UI.");
       }
       htmlAsset.source = html;
     },
@@ -59,6 +64,7 @@ export default defineConfig({
     outDir: resolve(directory, "dist"),
     emptyOutDir: true,
     assetsInlineLimit: 100_000_000,
+    modulePreload: false,
     target: "es2022",
     rollupOptions: {
       input: resolve(directory, "src/ui/index.html"),
