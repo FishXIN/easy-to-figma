@@ -456,6 +456,11 @@ select:focus-visible {
   animation: progress 1.4s ease-in-out infinite;
 }
 
+.progress-track span.is-determinate {
+  transition: width 180ms ease-out;
+  animation: none;
+}
+
 .ready-state {
   min-height: 70px;
   display: flex;

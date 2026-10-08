@@ -1,6 +1,6 @@
 {
   "name": "easy-to-figma",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Import PSD, Illustrator, and PowerPoint files into Figma while preserving editability.",
   "license": "MIT",

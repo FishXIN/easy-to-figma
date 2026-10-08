@@ -54,8 +54,13 @@ function toPaint(paint: Paint, context: RenderContext): SolidPaint | ImagePaint 
   if (!asset) return undefined;
   let image = context.images.get(asset.id);
   if (!image) {
-    const encoded = asset.data.includes(",") ? asset.data.slice(asset.data.indexOf(",") + 1) : asset.data;
-    image = figma.createImage(figma.base64Decode(encoded));
+    const bytes =
+      typeof asset.data === "string"
+        ? figma.base64Decode(
+            asset.data.includes(",") ? asset.data.slice(asset.data.indexOf(",") + 1) : asset.data,
+          )
+        : asset.data;
+    image = figma.createImage(bytes);
     context.images.set(asset.id, image);
   }
   const scaleModes: Record<NonNullable<typeof paint.scaleMode>, ImagePaint["scaleMode"]> = {
@@ -293,12 +298,22 @@ export async function renderDocument(document: IRDocument): Promise<RenderResult
   const totalWidth =
     document.pages.reduce((total, page) => total + page.width, 0) +
     Math.max(0, document.pages.length - 1) * 120;
-  let cursorX = figma.viewport.center.x - totalWidth / 2;
-  const top = figma.viewport.center.y - Math.max(...document.pages.map((page) => page.height)) / 2;
+  const existingNodes = figma.currentPage.children;
+  const left =
+    existingNodes.length > 0
+      ? Math.min(...existingNodes.map((node) => node.x))
+      : figma.viewport.center.x - totalWidth / 2;
+  let cursorX = left;
+  const top =
+    existingNodes.length > 0
+      ? Math.max(...existingNodes.map((node) => node.y + node.height)) + 240
+      : figma.viewport.center.y - Math.max(...document.pages.map((page) => page.height)) / 2;
 
-  for (const page of document.pages) {
+  for (const [pageIndex, page] of document.pages.entries()) {
     const positionedPage = { ...page, x: cursorX, y: top };
     const rendered = await renderNode(positionedPage, figma.currentPage, context);
+    rendered.setPluginData("easy-to-figma-source", document.source.name);
+    rendered.setPluginData("easy-to-figma-page", String(pageIndex + 1));
     renderedPages.push(rendered);
     cursorX += page.width + 120;
   }

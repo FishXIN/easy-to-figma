@@ -23,6 +23,8 @@ Easy to Figma is a free, open-source, cross-platform Figma import tool. Source f
 
 > Illustrator's private format does not have a complete, stable public specification. Save as SVG for editable paths. Files saved with “Create PDF Compatible File” can also be imported, with complex artwork preserved visually per artboard.
 
+File limits are 500 MB for PPTX / PSD and 1.5 GB for AI / SVG / PDF-compatible AI. Oversized AI artboards are tiled automatically without scaling or exceeding Figma image limits.
+
 ## Principles
 
 - **Editability first**: native Figma nodes are preferred over flattened output.

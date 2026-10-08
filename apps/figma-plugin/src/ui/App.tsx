@@ -13,7 +13,10 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { parseIllustrator } from "@easy-to-figma/parser-ai";
+import {
+  parseIllustrator,
+  type IllustratorParseProgress,
+} from "@easy-to-figma/parser-ai";
 import { parsePptx } from "@easy-to-figma/parser-pptx";
 import { parsePsd } from "@easy-to-figma/parser-psd";
 import {
@@ -32,7 +35,8 @@ interface ImportResult {
   missingFonts: string[];
 }
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024;
+const MAX_STANDARD_FILE_SIZE = 500 * 1024 * 1024;
+const MAX_ILLUSTRATOR_FILE_SIZE = 1.5 * 1024 * 1024 * 1024;
 
 const formatDetails: Record<
   FileFormat,
@@ -75,11 +79,18 @@ function sendToPlugin(message: unknown): void {
   window.parent.postMessage({ pluginMessage: message }, "*");
 }
 
-async function parseFile(file: File, format: FileFormat, options: ParseOptions): Promise<IRDocument> {
+async function parseFile(
+  file: File,
+  format: FileFormat,
+  options: ParseOptions,
+  onProgress: (progress: IllustratorParseProgress) => void,
+): Promise<IRDocument> {
+  if (format === "ai") {
+    return parseIllustrator(file, file.name, options, { onProgress });
+  }
   const buffer = await file.arrayBuffer();
   if (format === "pptx") return parsePptx(buffer, file.name, options);
-  if (format === "psd") return parsePsd(buffer, file.name, options);
-  return parseIllustrator(buffer, file.name, options);
+  return parsePsd(buffer, file.name, options);
 }
 
 function FormatIcon({ format }: { format: FileFormat }) {
@@ -97,6 +108,7 @@ export function App() {
   const [result, setResult] = useState<ImportResult>();
   const [error, setError] = useState("");
   const [options, setOptions] = useState<ParseOptions>(DEFAULT_PARSE_OPTIONS);
+  const [parseProgress, setParseProgress] = useState<IllustratorParseProgress>();
   const [showReport, setShowReport] = useState(false);
 
   useEffect(() => {
@@ -125,6 +137,7 @@ export function App() {
     setDocument(undefined);
     setResult(undefined);
     setError("");
+    setParseProgress(undefined);
     setShowReport(false);
     if (inputRef.current) inputRef.current.value = "";
   }, []);
@@ -137,8 +150,12 @@ export function App() {
         setStatus("error");
         return;
       }
-      if (nextFile.size > MAX_FILE_SIZE) {
-        setError("This file is larger than 200 MB. Optimize it before importing.");
+      const sizeLimit =
+        nextFormat === "ai" ? MAX_ILLUSTRATOR_FILE_SIZE : MAX_STANDARD_FILE_SIZE;
+      if (nextFile.size > sizeLimit) {
+        setError(
+          `This file is larger than ${formatBytes(sizeLimit)}. Optimize it before importing.`,
+        );
         setStatus("error");
         return;
       }
@@ -149,8 +166,9 @@ export function App() {
       setError("");
       setDocument(undefined);
       setResult(undefined);
+      setParseProgress(undefined);
       try {
-        const parsed = await parseFile(nextFile, nextFormat, options);
+        const parsed = await parseFile(nextFile, nextFormat, options, setParseProgress);
         setDocument(parsed);
         setStatus("ready");
       } catch (parseError) {
@@ -180,6 +198,11 @@ export function App() {
   const report = document?.report;
   const warningCount =
     report?.items.filter((item) => item.level === "warning" || item.level === "fallback").length ?? 0;
+  const parsePercent = Math.round((parseProgress?.progress ?? 0) * 100);
+  const parseStatus =
+    parseProgress?.pageCount && parseProgress.page > 0
+      ? `${parseProgress.phase === "encoding" ? "Encoding" : "Rendering"} artboard ${parseProgress.page} of ${parseProgress.pageCount}`
+      : "Resolving document structure";
 
   return (
     <main className="app-shell">
@@ -328,10 +351,17 @@ export function App() {
           {status === "parsing" && (
             <div className="progress-state" role="status">
               <span className="spinner" />
-              <strong>Reading source structure</strong>
-              <p>Resolving layers, assets and editable content.</p>
+              <strong>{parseStatus}</strong>
+              <p>
+                {parseProgress?.pageCount
+                  ? `${parsePercent}% · preserving artwork at 2x`
+                  : "Resolving layers, assets and editable content."}
+              </p>
               <span className="progress-track">
-                <span />
+                <span
+                  className={parseProgress?.pageCount ? "is-determinate" : ""}
+                  style={parseProgress?.pageCount ? { width: `${Math.max(2, parsePercent)}%` } : undefined}
+                />
               </span>
             </div>
           )}

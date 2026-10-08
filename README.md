@@ -23,6 +23,8 @@ Easy to Figma 是一个纯免费、开源、跨平台的 Figma 导入工具。�
 
 > AI 私有格式没有公开、稳定的完整规范。推荐将 AI 保存为 SVG 以保留路径可编辑性；启用 “Create PDF Compatible File” 时也可导入，但复杂内容会按画板降级。
 
+文件上限：PPTX / PSD 为 500 MB，AI / SVG / PDF-compatible AI 为 1.5 GB。超大 AI 画板会自动分片，避免缩放或超过 Figma 图片限制。
+
 ## 设计原则
 
 - **可编辑优先**：能映射到 Figma 原生节点，就不拍平。

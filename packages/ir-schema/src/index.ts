@@ -126,7 +126,7 @@ export interface Asset {
   id: string;
   name: string;
   mimeType: string;
-  data: string;
+  data: string | Uint8Array;
   width?: number;
   height?: number;
 }

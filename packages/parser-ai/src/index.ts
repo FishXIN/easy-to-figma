@@ -22,6 +22,50 @@ interface SvgContext {
   report: ReturnType<typeof createReport>;
 }
 
+export interface IllustratorParseProgress {
+  phase: "loading" | "rendering" | "encoding";
+  page: number;
+  pageCount: number;
+  progress: number;
+}
+
+export interface IllustratorParseCallbacks {
+  onProgress?: (progress: IllustratorParseProgress) => void;
+}
+
+const PDF_RASTER_SCALE = 2;
+const MAX_IMAGE_TILE_SIZE = 4096;
+
+export interface ImageTile {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function calculateImageTiles(
+  width: number,
+  height: number,
+  maxSize = MAX_IMAGE_TILE_SIZE,
+): ImageTile[] {
+  const tiles: ImageTile[] = [];
+  const columns = Math.ceil(width / maxSize);
+  const rows = Math.ceil(height / maxSize);
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x = column * maxSize;
+      const y = row * maxSize;
+      tiles.push({
+        x,
+        y,
+        width: Math.min(maxSize, width - x),
+        height: Math.min(maxSize, height - y),
+      });
+    }
+  }
+  return tiles;
+}
+
 function numberAttribute(element: Element, name: string, fallback = 0): number {
   const value = Number.parseFloat(element.getAttribute(name) ?? "");
   return Number.isFinite(value) ? value : fallback;
@@ -367,7 +411,26 @@ function parseSvg(bytes: Uint8Array, sourceName: string): IRDocument {
   };
 }
 
-async function parsePdfFallback(bytes: Uint8Array, sourceName: string, options: ParseOptions): Promise<IRDocument> {
+function sourceBaseName(sourceName: string): string {
+  return sourceName.replace(/\.(ai|pdf)$/i, "") || "Illustrator";
+}
+
+async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((result) => {
+      if (result) resolve(result);
+      else reject(new Error("The rendered Illustrator artboard could not be encoded as PNG."));
+    }, "image/png");
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+async function parsePdfFallback(
+  source: Uint8Array | Blob,
+  sourceName: string,
+  options: ParseOptions,
+  callbacks: IllustratorParseCallbacks,
+): Promise<IRDocument> {
   if (options.unsupportedStrategy === "skip") {
     throw new Error("PDF-compatible Illustrator content requires raster fallback. Enable rasterize to continue.");
   }
@@ -379,58 +442,103 @@ async function parsePdfFallback(bytes: Uint8Array, sourceName: string, options: 
     import("pdfjs-dist/legacy/build/pdf.mjs"),
     import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw"),
   ]);
-  GlobalWorkerOptions.workerSrc = URL.createObjectURL(
-    new Blob([pdfWorkerSource], { type: "text/javascript" }),
-  );
-  const loadingTask = getDocument({ data: bytes.slice() });
-  const pdf = await loadingTask.promise;
+  const sourceByteSize = source instanceof Blob ? source.size : source.byteLength;
+  const workerUrl = URL.createObjectURL(new Blob([pdfWorkerSource], { type: "text/javascript" }));
+  const sourceUrl = source instanceof Blob ? URL.createObjectURL(source) : undefined;
+  GlobalWorkerOptions.workerSrc = workerUrl;
+  const loadingTask = sourceUrl
+    ? getDocument({ url: sourceUrl })
+    : getDocument({ data: source as Uint8Array });
   const report = createReport(sourceName.toLowerCase().endsWith(".ai") ? "ai" : "pdf", sourceName);
   const assets: Asset[] = [];
   const pages: ContainerNode[] = [];
+  const baseName = sourceBaseName(sourceName);
 
-  for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {
-    const pdfPage = await pdf.getPage(pageIndex);
-    const viewport = pdfPage.getViewport({ scale: 2 });
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-    const canvasContext = canvas.getContext("2d");
-    if (!canvasContext) throw new Error("Canvas rendering is unavailable.");
-    await pdfPage.render({ canvas, canvasContext, viewport }).promise;
+  callbacks.onProgress?.({ phase: "loading", page: 0, pageCount: 0, progress: 0 });
+  try {
+    const pdf = await loadingTask.promise;
+    callbacks.onProgress?.({ phase: "loading", page: 0, pageCount: pdf.numPages, progress: 0 });
 
-    const assetId = createId("asset");
-    assets.push({
-      id: assetId,
-      name: `${sourceName} - Artboard ${pageIndex}.png`,
-      mimeType: "image/png",
-      data: canvas.toDataURL("image/png"),
-      width: canvas.width,
-      height: canvas.height,
-    });
-    pages.push({
-      id: createId("artboard"),
-      name: `Artboard ${pageIndex}`,
-      type: "frame",
-      x: 0,
-      y: 0,
-      width: viewport.width / 2,
-      height: viewport.height / 2,
-      fills: [],
-      children: [
-        {
+    for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {
+      const pdfPage = await pdf.getPage(pageIndex);
+      const viewport = pdfPage.getViewport({ scale: PDF_RASTER_SCALE });
+      const rasterWidth = Math.ceil(viewport.width);
+      const rasterHeight = Math.ceil(viewport.height);
+      const tiles = calculateImageTiles(rasterWidth, rasterHeight);
+      const children: IRNode[] = [];
+      const pageLabel = String(pageIndex).padStart(2, "0");
+      const tileCount = tiles.length;
+
+      callbacks.onProgress?.({
+        phase: "rendering",
+        page: pageIndex,
+        pageCount: pdf.numPages,
+        progress: (pageIndex - 1) / pdf.numPages,
+      });
+
+      for (const [tileOffset, tile] of tiles.entries()) {
+        const tileIndex = tileOffset + 1;
+        const canvas = document.createElement("canvas");
+        canvas.width = tile.width;
+        canvas.height = tile.height;
+        const canvasContext = canvas.getContext("2d");
+        if (!canvasContext) throw new Error("Canvas rendering is unavailable.");
+
+        await pdfPage.render({
+          canvas,
+          canvasContext,
+          viewport,
+          transform: [1, 0, 0, 1, -tile.x, -tile.y],
+        }).promise;
+
+        callbacks.onProgress?.({
+          phase: "encoding",
+          page: pageIndex,
+          pageCount: pdf.numPages,
+          progress: ((pageIndex - 1) + tileIndex / tileCount) / pdf.numPages,
+        });
+        const assetId = createId("asset");
+        assets.push({
+          id: assetId,
+          name: `${pageLabel} ${baseName} ${String(tileIndex).padStart(2, "0")}.png`,
+          mimeType: "image/png",
+          data: await canvasToPngBytes(canvas),
+          width: tile.width,
+          height: tile.height,
+        });
+        children.push({
           id: createId("image"),
-          name: "PDF-compatible artwork",
+          name: tileCount === 1 ? "01 视觉层" : `${String(tileIndex).padStart(2, "0")} 视觉分片`,
           type: "image",
-          x: 0,
-          y: 0,
-          width: viewport.width / 2,
-          height: viewport.height / 2,
+          x: tile.x / PDF_RASTER_SCALE,
+          y: tile.y / PDF_RASTER_SCALE,
+          width: tile.width / PDF_RASTER_SCALE,
+          height: tile.height / PDF_RASTER_SCALE,
           assetRef: assetId,
           scaleMode: "fill",
-        },
-      ],
-      clipsContent: true,
-    });
+        });
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+
+      pages.push({
+        id: createId("artboard"),
+        name: `${pageLabel} ${baseName}`,
+        type: "frame",
+        x: 0,
+        y: 0,
+        width: viewport.width / PDF_RASTER_SCALE,
+        height: viewport.height / PDF_RASTER_SCALE,
+        fills: [{ type: "solid", color: { r: 1, g: 1, b: 1, a: 1 } }],
+        children,
+        clipsContent: true,
+      });
+      pdfPage.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+    URL.revokeObjectURL(workerUrl);
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
   }
 
   report.parsedNodes = countNodes(pages);
@@ -439,16 +547,15 @@ async function parsePdfFallback(bytes: Uint8Array, sourceName: string, options: 
     level: "fallback",
     code: "AI_PDF_FALLBACK",
     message:
-      "PDF-compatible Illustrator artwork was preserved visually per artboard. Save as SVG to retain editable paths.",
+      "PDF-compatible Illustrator artwork was preserved visually at 2x per artboard. Oversized images were tiled without scaling. Save as SVG to retain editable paths.",
   });
-  await loadingTask.destroy();
 
   return {
     version: IR_VERSION,
     source: {
       name: sourceName,
       format: sourceName.toLowerCase().endsWith(".ai") ? "ai" : "pdf",
-      byteSize: bytes.byteLength,
+      byteSize: sourceByteSize,
     },
     pages,
     assets,
@@ -457,17 +564,24 @@ async function parsePdfFallback(bytes: Uint8Array, sourceName: string, options: 
 }
 
 export async function parseIllustrator(
-  input: ArrayBuffer | Uint8Array,
+  input: ArrayBuffer | Uint8Array | Blob,
   sourceName: string,
   options: ParseOptions,
+  callbacks: IllustratorParseCallbacks = {},
 ): Promise<IRDocument> {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  const blob = typeof Blob !== "undefined" && input instanceof Blob ? input : undefined;
+  const bytes = blob
+    ? new Uint8Array(await blob.slice(0, 512).arrayBuffer())
+    : input instanceof Uint8Array
+      ? input
+      : new Uint8Array(input as ArrayBuffer);
   const header = new TextDecoder().decode(bytes.subarray(0, Math.min(bytes.length, 512))).trimStart();
   if (header.startsWith("<svg") || header.startsWith("<?xml")) {
-    return parseSvg(bytes, sourceName);
+    const svgBytes = blob ? new Uint8Array(await blob.arrayBuffer()) : bytes;
+    return parseSvg(svgBytes, sourceName);
   }
   if (header.startsWith("%PDF-")) {
-    return parsePdfFallback(bytes, sourceName, options);
+    return parsePdfFallback(blob ?? bytes, sourceName, options, callbacks);
   }
   throw new Error(
     "This .ai file is neither SVG-compatible nor saved with PDF compatibility. Re-save it with Create PDF Compatible File enabled.",

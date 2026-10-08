@@ -53,7 +53,9 @@ Native `.ai` files are supported when either:
 1. The payload is SVG-compatible.
 2. The file was saved with PDF compatibility.
 
-PDF-compatible files are rendered per artboard at 2x and listed as fallback content. This is intentional: reconstructing arbitrary PDF drawing operators into clean editable layers without the Illustrator object model would create unreliable output.
+PDF-compatible files are rendered per artboard at 2x and listed as fallback content. Files are read through Blob URLs instead of being copied into one large buffer. Raster output larger than 4096px is split into lossless, aligned tiles so Figma can retain the original artboard dimensions without exceeding image limits.
+
+The plugin reports loading, rendering, and PNG encoding progress for each artboard. This is intentional: reconstructing arbitrary PDF drawing operators into clean editable layers without the Illustrator object model would create unreliable output.
 
 ## Text Strategy
 
