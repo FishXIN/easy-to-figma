@@ -1093,6 +1093,8 @@ interface PdfImageSegment {
   start: number;
   end: number;
   blendMode: string;
+  opacity: number;
+  hasSoftMask: boolean;
 }
 
 interface PdfTextItem {
@@ -1161,18 +1163,76 @@ function pdfGStateEntries(args: unknown): Array<[string, unknown]> {
   );
 }
 
-function pdfSegmentBlendMode(
+export interface PdfImageSegmentStyle {
+  blendMode: string;
+  opacity: number;
+  hasSoftMask: boolean;
+}
+
+function pdfGroupOptions(args: unknown): {
+  hasSoftMask?: boolean;
+} {
+  if (!Array.isArray(args) || !args[0] || typeof args[0] !== "object") return {};
+  return args[0] as { hasSoftMask?: boolean };
+}
+
+export function extractPdfImageSegmentStyle(
   operatorList: PdfOperatorList,
   start: number,
   end: number,
   ops: Record<string, number>,
-): string {
+): PdfImageSegmentStyle {
+  let state: PdfImageSegmentStyle = {
+    blendMode: "normal",
+    opacity: 1,
+    hasSoftMask: false,
+  };
+  let imageStyle: PdfImageSegmentStyle | undefined;
+  let groupOutputStyle: PdfImageSegmentStyle | undefined;
+  let encounteredSoftMask = false;
+  const stack: PdfImageSegmentStyle[] = [];
+  const imageOperators = new Set([
+    ops.paintImageXObject,
+    ops.paintInlineImageXObject,
+    ops.paintImageMaskXObject,
+  ]);
   for (let index = start; index <= end; index += 1) {
-    if (operatorList.fnArray[index] !== ops.setGState) continue;
-    const blend = pdfGStateEntries(operatorList.argsArray[index]).find(([name]) => name === "BM");
-    if (blend) return pdfBlendMode(blend[1]);
+    const operator = operatorList.fnArray[index];
+    if (operator === ops.save || operator === ops.beginGroup) {
+      stack.push({ ...state });
+      if (operator === ops.beginGroup && pdfGroupOptions(operatorList.argsArray[index]).hasSoftMask) {
+        groupOutputStyle ??= { ...state, hasSoftMask: true };
+        encounteredSoftMask = true;
+        state = { ...state, hasSoftMask: true };
+      }
+      continue;
+    }
+    if (operator === ops.restore || operator === ops.endGroup) {
+      state = stack.pop() ?? state;
+      continue;
+    }
+    if (operator === ops.setGState) {
+      for (const [name, value] of pdfGStateEntries(operatorList.argsArray[index])) {
+        if (name === "BM") state = { ...state, blendMode: pdfBlendMode(value) };
+        if (name === "ca") {
+          const opacity = Number(value);
+          if (Number.isFinite(opacity)) {
+            state = { ...state, opacity: Math.max(0, Math.min(1, opacity)) };
+          }
+        }
+        if (name === "SMask") {
+          if (value) encounteredSoftMask = true;
+          state = { ...state, hasSoftMask: Boolean(value) };
+        }
+      }
+    }
+    if (imageOperators.has(operator)) imageStyle = { ...state };
   }
-  return "normal";
+  const style = groupOutputStyle ?? imageStyle ?? state;
+  return {
+    ...style,
+    hasSoftMask: encounteredSoftMask || style.hasSoftMask,
+  };
 }
 
 function pdfImageSegments(
@@ -1205,10 +1265,11 @@ function pdfImageSegments(
       .slice(start, index + 1)
       .some((candidate) => imageOperators.has(candidate));
     if (hasImage) {
+      const style = extractPdfImageSegmentStyle(operatorList, start, index, ops);
       segments.push({
         start,
         end: index,
-        blendMode: pdfSegmentBlendMode(operatorList, start, index, ops),
+        ...style,
       });
     }
     start = -1;
@@ -1217,13 +1278,39 @@ function pdfImageSegments(
   if (directImageStart >= 0 && !segments.some((segment) =>
     directImageStart >= segment.start && directImageStart <= segment.end
   )) {
+    const style = extractPdfImageSegmentStyle(
+      operatorList,
+      range.start,
+      directImageStart,
+      ops,
+    );
     segments.push({
       start: directImageStart,
       end: directImageStart,
-      blendMode: pdfSegmentBlendMode(operatorList, range.start, directImageStart, ops),
+      ...style,
     });
   }
   return segments;
+}
+
+export function restoreUniformOpacity(
+  pixels: Uint8ClampedArray,
+  opacity: number,
+): Uint8ClampedArray {
+  if (!Number.isFinite(opacity) || opacity <= 0 || opacity >= 1) return pixels;
+  for (let index = 3; index < pixels.length; index += 4) {
+    pixels[index] = Math.min(255, Math.round((pixels[index] ?? 0) / opacity));
+  }
+  return pixels;
+}
+
+function restoreCanvasOpacity(canvas: HTMLCanvasElement, opacity: number): void {
+  if (opacity <= 0 || opacity >= 1) return;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  restoreUniformOpacity(image.data, opacity);
+  context.putImageData(image, 0, 0);
 }
 
 function canvasHasVisiblePixels(canvas: HTMLCanvasElement): boolean {
@@ -1279,6 +1366,7 @@ async function renderPdfImageLayers(
       background: "rgba(0,0,0,0)",
       operationsFilter: (index) => index >= segment.start && index <= segment.end,
     }).promise;
+    restoreCanvasOpacity(canvas, segment.opacity);
     if (!canvasHasVisiblePixels(canvas)) {
       canvas.width = 1;
       canvas.height = 1;
@@ -1302,10 +1390,30 @@ async function renderPdfImageLayers(
       y: 0,
       width: viewport.width,
       height: viewport.height,
+      opacity: segment.opacity,
       blendMode: segment.blendMode,
       assetRef: assetId,
       scaleMode: "fill",
     });
+    if (segment.hasSoftMask) {
+      context.report.items.push({
+        level: "fallback",
+        code: "PDF_SOFT_MASK_EFFECT_PRESERVED",
+        message:
+          "The source soft mask or blur was preserved inside this independent image layer; its blend mode and opacity remain native Figma properties.",
+        nodeName: pdfImageLayerName(nodes.length - 1, segment.blendMode),
+        pageName: range.name,
+      });
+    } else if (segment.blendMode !== "normal" || segment.opacity < 1) {
+      context.report.items.push({
+        level: "info",
+        code: "PDF_IMAGE_COMPOSITING_PRESERVED",
+        message:
+          "The source image blend mode and opacity were restored as native Figma layer properties.",
+        nodeName: pdfImageLayerName(nodes.length - 1, segment.blendMode),
+        pageName: range.name,
+      });
+    }
     context.report.editableNodes += 1;
     canvas.width = 1;
     canvas.height = 1;

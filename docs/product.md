@@ -49,13 +49,16 @@ The project is not a generic file-to-image converter. Its primary output is a Fi
 - Editable text layers
 - Pixel layers as independent image fills
 - Visibility, opacity, names, and blend modes
+- Native luminance masks with density and feather
+- Native image adjustments for exposure, contrast, saturation, temperature, tint, highlights, and shadows
+- Masked adjustment overlays for compatible image layers
 
 ## Explicit Non-goals
 
 - Bidirectional synchronization
 - Incremental source updates
 - Full Smart Object reconstruction
-- Photoshop adjustment-layer and filter equivalence
+- Photoshop adjustment parameters without a Figma equivalent, including hue rotation, per-channel corrections, LUTs, and gradient maps
 - PowerPoint animation or transition import
 - SmartArt reconstruction
 - Exact cross-engine text line breaking

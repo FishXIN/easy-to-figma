@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IR_VERSION, createReport, type IRDocument } from "@easy-to-figma/ir-schema";
-import { renderDocument } from "./index";
+import { analyzeDocumentFonts, renderDocument } from "./index";
 
 class MockNode {
   children: MockNode[] = [];
@@ -22,6 +22,8 @@ class MockNode {
   dashPattern: number[] = [];
   clipsContent = false;
   cornerRadius = 0;
+  isMask = false;
+  maskType = "ALPHA";
 
   constructor(readonly type: string) {}
 
@@ -245,5 +247,159 @@ describe("renderDocument hierarchy", () => {
       'The source SVG node "Effect" could not be imported',
     );
     expect(figma.currentPage.children).toEqual([existing]);
+  });
+
+  it("maps image adjustments and mask semantics to native Figma properties", async () => {
+    const document: IRDocument = {
+      version: IR_VERSION,
+      source: { name: "masked.psd", format: "psd", byteSize: 1 },
+      assets: [
+        {
+          id: "image-asset",
+          name: "mask.png",
+          mimeType: "image/png",
+          data: new Uint8Array([1]),
+        },
+      ],
+      report: createReport("psd", "masked.psd"),
+      pages: [
+        {
+          id: "page",
+          name: "PSD",
+          type: "frame",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+          children: [
+            {
+              id: "mask",
+              name: "Layer Mask",
+              type: "image",
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              assetRef: "image-asset",
+              isMask: true,
+              maskType: "luminance",
+              filters: {
+                exposure: 0.25,
+                contrast: -0.5,
+                saturation: 2,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await renderDocument(document);
+    const page = figma.currentPage.children[0] as unknown as MockNode;
+    const mask = page.children[0]!;
+
+    expect(mask.isMask).toBe(true);
+    expect(mask.maskType).toBe("LUMINANCE");
+    expect(mask.fills).toEqual([
+      expect.objectContaining({
+        filters: {
+          exposure: 0.25,
+          contrast: -0.5,
+          saturation: 1,
+          temperature: undefined,
+          tint: undefined,
+          highlights: undefined,
+          shadows: undefined,
+        },
+      }),
+    ]);
+  });
+});
+
+describe("font resolution", () => {
+  const document: IRDocument = {
+    version: IR_VERSION,
+    source: { name: "fonts.ai", format: "ai", byteSize: 1 },
+    assets: [],
+    report: createReport("ai", "fonts.ai"),
+    pages: [
+      {
+        id: "page",
+        name: "Artboard",
+        type: "frame",
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+        children: [
+          {
+            id: "text",
+            name: "Title",
+            type: "text",
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+            characters: "Exact",
+            fontFamily: "Missing Display",
+            fontStyle: "Bold",
+            runs: [
+              {
+                start: 0,
+                end: 5,
+                fontFamily: "Available Sans",
+                fontStyle: "Regular",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("checks base text and styled runs as exact family/style pairs", async () => {
+    const analysis = await analyzeDocumentFonts(document, [
+      { family: "Inter", style: "Regular" },
+      { family: "Available Sans", style: "Regular" },
+    ]);
+
+    expect(analysis.requestedFonts).toEqual([
+      { family: "Available Sans", style: "Regular" },
+      { family: "Missing Display", style: "Bold" },
+    ]);
+    expect(analysis.missingFonts).toEqual([
+      {
+        key: "missing display::bold",
+        requested: { family: "Missing Display", style: "Bold" },
+        suggested: { family: "Inter", style: "Regular" },
+      },
+    ]);
+  });
+
+  it("uses the explicit replacement and reports the source-to-target mapping", async () => {
+    (figma as unknown as {
+      listAvailableFontsAsync: () => Promise<Array<{ fontName: FontName }>>;
+    }).listAvailableFontsAsync = async () => [
+      { fontName: { family: "Inter", style: "Regular" } },
+      { fontName: { family: "Available Sans", style: "Regular" } },
+      { fontName: { family: "Replacement Serif", style: "Bold" } },
+    ];
+
+    const result = await renderDocument(document, {
+      fontReplacements: {
+        "missing display::bold": { family: "Replacement Serif", style: "Bold" },
+      },
+    });
+    const page = figma.currentPage.children[0] as unknown as MockNode;
+    const text = page.children[0] as MockTextNode;
+
+    expect(text.fontName).toEqual({ family: "Replacement Serif", style: "Bold" });
+    expect(result.missingFonts).toEqual(["Missing Display Bold"]);
+    expect(result.fontSubstitutions).toEqual([
+      {
+        requested: { family: "Missing Display", style: "Bold" },
+        replacement: { family: "Replacement Serif", style: "Bold" },
+      },
+    ]);
   });
 });

@@ -2,6 +2,7 @@ import type {
   Asset,
   Color,
   Effect as IREffect,
+  ImageFilterValues,
   IRDocument,
   IRNode,
   Paint,
@@ -13,14 +14,46 @@ export interface RenderResult {
   pageCount: number;
   nodeCount: number;
   missingFonts: string[];
+  fontSubstitutions: FontSubstitution[];
+}
+
+export interface FontDescriptor {
+  family: string;
+  style: string;
+}
+
+export interface MissingFont {
+  key: string;
+  requested: FontDescriptor;
+  suggested: FontDescriptor;
+}
+
+export interface FontAnalysis {
+  requestedFonts: FontDescriptor[];
+  availableFonts: FontDescriptor[];
+  missingFonts: MissingFont[];
+  fallbackFont: FontDescriptor;
+}
+
+export interface FontSubstitution {
+  requested: FontDescriptor;
+  replacement: FontDescriptor;
+}
+
+export type FontReplacementMap = Record<string, FontDescriptor>;
+
+export interface RenderOptions {
+  fontReplacements?: FontReplacementMap;
 }
 
 interface RenderContext {
   assets: Map<string, Asset>;
   images: Map<string, Image>;
   fonts: Map<string, FontName>;
+  fontReplacements: Map<string, FontDescriptor>;
   fallbackFont: FontName;
   missingFonts: Set<string>;
+  fontSubstitutions: Map<string, FontSubstitution>;
   nodeCount: number;
 }
 
@@ -75,6 +108,22 @@ function toPaint(paint: Paint, context: RenderContext): SolidPaint | ImagePaint 
     imageHash: image.hash,
     scaleMode: scaleModes[paint.scaleMode ?? "fill"],
     opacity: paint.opacity ?? 1,
+    filters: toImageFilters(paint.filters),
+  };
+}
+
+function toImageFilters(filters: ImageFilterValues | undefined): ImageFilters | undefined {
+  if (!filters) return undefined;
+  const clamp = (value: number | undefined): number | undefined =>
+    value === undefined ? undefined : Math.max(-1, Math.min(1, value));
+  return {
+    exposure: clamp(filters.exposure),
+    contrast: clamp(filters.contrast),
+    saturation: clamp(filters.saturation),
+    temperature: clamp(filters.temperature),
+    tint: clamp(filters.tint),
+    highlights: clamp(filters.highlights),
+    shadows: clamp(filters.shadows),
   };
 }
 
@@ -160,6 +209,10 @@ function applyCommon(node: RenderedNode, source: IRNode, context: RenderContext)
   node.locked = source.locked ?? false;
   if ("rotation" in node) node.rotation = source.rotation ?? 0;
   if ("blendMode" in node) node.blendMode = mapBlendMode(source.blendMode);
+  if ("isMask" in node && source.isMask !== undefined) {
+    node.isMask = source.isMask;
+    if (source.maskType) node.maskType = source.maskType.toUpperCase() as MaskType;
+  }
   if ("effects" in node) node.effects = toEffects(source.effects);
   if ("fills" in node && source.fills) {
     node.fills = source.fills
@@ -176,7 +229,7 @@ function applyCommon(node: RenderedNode, source: IRNode, context: RenderContext)
 
 const FONT_SUBSTITUTIONS: Array<{
   matches: RegExp;
-  candidates: FontName[];
+  candidates: FontDescriptor[];
 }> = [
   {
     matches: /singkaibeieg-bold-gb/i,
@@ -201,33 +254,144 @@ const FONT_SUBSTITUTIONS: Array<{
   },
 ];
 
-function chooseFont(source: IRTextNode, context: RenderContext): FontName {
-  const requestedFamily = source.fontFamily?.trim() || context.fallbackFont.family;
-  const requestedStyle = source.fontStyle?.trim() || "Regular";
-  const exact = context.fonts.get(`${requestedFamily}::${requestedStyle}`.toLowerCase());
-  if (exact) return exact;
-  const familyRegular = context.fonts.get(`${requestedFamily}::Regular`.toLowerCase());
-  if (familyRegular) return familyRegular;
-  context.missingFonts.add(`${requestedFamily} ${requestedStyle}`);
-  const substitution = FONT_SUBSTITUTIONS.find(({ matches }) => matches.test(requestedFamily));
+export function fontKey(font: FontDescriptor): string {
+  return `${font.family.trim()}::${font.style.trim()}`.toLowerCase();
+}
+
+function fontLabel(font: FontDescriptor): string {
+  return `${font.family} ${font.style}`;
+}
+
+function requestedFont(
+  fontFamily: string | undefined,
+  fontStyle: string | undefined,
+  fallbackFont?: FontDescriptor,
+): FontDescriptor | undefined {
+  const family = fontFamily?.trim() || fallbackFont?.family;
+  if (!family) return undefined;
+  return {
+    family,
+    style: fontStyle?.trim() || fallbackFont?.style || "Regular",
+  };
+}
+
+export function collectRequestedFonts(document: IRDocument): FontDescriptor[] {
+  const fonts = new Map<string, FontDescriptor>();
+  const visit = (node: IRNode): void => {
+    if (node.type === "text") {
+      const base = requestedFont(node.fontFamily, node.fontStyle);
+      if (base) fonts.set(fontKey(base), base);
+      for (const run of node.runs ?? []) {
+        const runFont = requestedFont(run.fontFamily, run.fontStyle, base);
+        if (runFont) fonts.set(fontKey(runFont), runFont);
+      }
+    }
+    if ("children" in node) {
+      for (const child of node.children) visit(child);
+    }
+  };
+  for (const page of document.pages) visit(page);
+  return [...fonts.values()].sort(
+    (left, right) =>
+      left.family.localeCompare(right.family) || left.style.localeCompare(right.style),
+  );
+}
+
+function chooseSuggestedFont(
+  requested: FontDescriptor,
+  fonts: Map<string, FontDescriptor>,
+  fallbackFont: FontDescriptor,
+): FontDescriptor {
+  const exactFamily = [...fonts.values()].filter(
+    (font) => font.family.toLowerCase() === requested.family.toLowerCase(),
+  );
+  const regular =
+    exactFamily.find((font) => font.style.toLowerCase() === "regular") ?? exactFamily[0];
+  if (regular) return regular;
+
+  const substitution = FONT_SUBSTITUTIONS.find(({ matches }) => matches.test(requested.family));
   for (const candidate of substitution?.candidates ?? []) {
-    const available = context.fonts.get(`${candidate.family}::${candidate.style}`.toLowerCase());
+    const available = fonts.get(fontKey(candidate));
     if (available) return available;
   }
-  return context.fallbackFont;
+  return fallbackFont;
+}
+
+export async function analyzeRequestedFonts(
+  requestedFonts: FontDescriptor[],
+  knownAvailableFonts?: FontDescriptor[],
+): Promise<FontAnalysis> {
+  const availableFonts =
+    knownAvailableFonts ??
+    (await figma.listAvailableFontsAsync()).map(({ fontName }) => ({
+      family: fontName.family,
+      style: fontName.style,
+    }));
+  const fonts = new Map<string, FontDescriptor>();
+  for (const font of availableFonts) fonts.set(fontKey(font), font);
+  const sortedAvailableFonts = [...fonts.values()].sort(
+    (left, right) =>
+      left.family.localeCompare(right.family) || left.style.localeCompare(right.style),
+  );
+  const fallbackFont =
+    fonts.get(fontKey({ family: "Inter", style: "Regular" })) ??
+    fonts.get(fontKey({ family: "Arial", style: "Regular" })) ??
+    sortedAvailableFonts[0];
+  if (!fallbackFont) throw new Error("No fonts are available in Figma.");
+
+  const missingFonts = requestedFonts
+    .filter((font) => !fonts.has(fontKey(font)))
+    .map((font) => ({
+      key: fontKey(font),
+      requested: font,
+      suggested: chooseSuggestedFont(font, fonts, fallbackFont),
+    }));
+  return {
+    requestedFonts,
+    availableFonts: sortedAvailableFonts,
+    missingFonts,
+    fallbackFont,
+  };
+}
+
+export async function analyzeDocumentFonts(
+  document: IRDocument,
+  knownAvailableFonts?: FontDescriptor[],
+): Promise<FontAnalysis> {
+  return analyzeRequestedFonts(collectRequestedFonts(document), knownAvailableFonts);
+}
+
+function chooseFont(
+  fontFamily: string | undefined,
+  fontStyle: string | undefined,
+  context: RenderContext,
+): FontName {
+  const requested =
+    requestedFont(fontFamily, fontStyle) ?? context.fallbackFont;
+  const requestedKey = fontKey(requested);
+  const exact = context.fonts.get(requestedKey);
+  if (exact) return exact;
+
+  context.missingFonts.add(fontLabel(requested));
+  const replacementRequest = context.fontReplacements.get(requestedKey);
+  const replacement =
+    (replacementRequest && context.fonts.get(fontKey(replacementRequest))) ??
+    context.fallbackFont;
+  context.fontSubstitutions.set(requestedKey, {
+    requested,
+    replacement,
+  });
+  return replacement;
 }
 
 async function createText(source: IRTextNode, context: RenderContext): Promise<TextNode> {
   const node = figma.createText();
-  const fontName = chooseFont(source, context);
+  const fontName = chooseFont(source.fontFamily, source.fontStyle, context);
   const styledRuns = (source.runs ?? []).map((run) => ({
     ...run,
     fontName: chooseFont(
-      {
-        ...source,
-        fontFamily: run.fontFamily ?? source.fontFamily,
-        fontStyle: run.fontStyle ?? source.fontStyle,
-      },
+      run.fontFamily ?? source.fontFamily,
+      run.fontStyle ?? source.fontStyle,
       context,
     ),
   }));
@@ -405,7 +569,12 @@ async function renderNode(
     const rectangle = figma.createRectangle();
     rectangle.resize(Math.max(1, source.width), Math.max(1, source.height));
     const paint = toPaint(
-      { type: "image", assetRef: source.assetRef, scaleMode: source.scaleMode },
+      {
+        type: "image",
+        assetRef: source.assetRef,
+        scaleMode: source.scaleMode,
+        filters: source.filters,
+      },
       context,
     );
     rectangle.fills = paint ? [paint] : [];
@@ -426,11 +595,14 @@ async function renderNode(
   return [node];
 }
 
-export async function renderDocument(document: IRDocument): Promise<RenderResult> {
+export async function renderDocument(
+  document: IRDocument,
+  options: RenderOptions = {},
+): Promise<RenderResult> {
   const availableFonts = await figma.listAvailableFontsAsync();
   const fonts = new Map<string, FontName>();
   for (const font of availableFonts) {
-    fonts.set(`${font.fontName.family}::${font.fontName.style}`.toLowerCase(), font.fontName);
+    fonts.set(fontKey(font.fontName), font.fontName);
   }
   const fallbackFont =
     fonts.get("inter::regular") ?? fonts.get("arial::regular") ?? availableFonts[0]?.fontName;
@@ -440,8 +612,15 @@ export async function renderDocument(document: IRDocument): Promise<RenderResult
     assets: new Map(document.assets.map((asset) => [asset.id, asset])),
     images: new Map(),
     fonts,
+    fontReplacements: new Map(
+      Object.entries(options.fontReplacements ?? {}).map(([key, value]) => [
+        key.toLowerCase(),
+        value,
+      ]),
+    ),
     fallbackFont,
     missingFonts: new Set(),
+    fontSubstitutions: new Map(),
     nodeCount: 0,
   };
   const renderedPages: SceneNode[] = [];
@@ -486,5 +665,8 @@ export async function renderDocument(document: IRDocument): Promise<RenderResult
     pageCount: renderedPages.length,
     nodeCount: context.nodeCount,
     missingFonts,
+    fontSubstitutions: [...context.fontSubstitutions.values()].sort((left, right) =>
+      fontLabel(left.requested).localeCompare(fontLabel(right.requested)),
+    ),
   };
 }

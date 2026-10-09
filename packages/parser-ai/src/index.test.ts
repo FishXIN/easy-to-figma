@@ -3,8 +3,10 @@ import { DEFAULT_PARSE_OPTIONS } from "@easy-to-figma/ir-schema";
 import {
   calculateImageTiles,
   convertPdfJs6ConstructPath,
+  extractPdfImageSegmentStyle,
   normalizePdfSvgMarkup,
   parseIllustrator,
+  restoreUniformOpacity,
 } from "./index";
 
 describe("parseIllustrator", () => {
@@ -196,6 +198,50 @@ describe("parseIllustrator", () => {
     const normalized = normalizePdfSvgMarkup(markup);
 
     expect(normalized.match(/\sxmlns=/g)).toHaveLength(1);
+  });
+
+  it("extracts native image compositing before the PDF graphics state is restored", () => {
+    const ops = {
+      setGState: 9,
+      save: 10,
+      restore: 11,
+      beginGroup: 76,
+      endGroup: 77,
+      paintImageMaskXObject: 83,
+      paintImageXObject: 85,
+      paintInlineImageXObject: 86,
+    };
+    const style = extractPdfImageSegmentStyle(
+      {
+        fnArray: [10, 9, 76, 9, 85, 77, 11],
+        argsArray: [
+          null,
+          [[["BM", "multiply"], ["ca", 0.4], ["SMask", true]]],
+          [{ hasSoftMask: true }],
+          [[["BM", "source-over"], ["ca", 1], ["SMask", false]]],
+          ["image"],
+          null,
+          null,
+        ],
+      },
+      0,
+      5,
+      ops,
+    );
+
+    expect(style).toEqual({
+      blendMode: "multiply",
+      opacity: 0.4,
+      hasSoftMask: true,
+    });
+  });
+
+  it("removes uniform source opacity from rendered alpha without changing color", () => {
+    const pixels = new Uint8ClampedArray([10, 20, 30, 64, 40, 50, 60, 128]);
+
+    restoreUniformOpacity(pixels, 0.5);
+
+    expect([...pixels]).toEqual([10, 20, 30, 128, 40, 50, 60, 255]);
   });
 
   it("rejects native AI files without a compatible payload", async () => {

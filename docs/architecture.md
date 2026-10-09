@@ -32,8 +32,9 @@ Large binary work stays outside the Figma main-thread sandbox. The resulting ser
 The main thread owns document mutation:
 
 - Loads available fonts
+- Compares requested family/style pairs and returns replacement choices before import
 - Creates frames, text, geometry, vectors, and image fills
-- Restores hierarchy and common visual properties
+- Restores hierarchy, masks, image filters, and common visual properties
 - Selects and reveals imported pages
 - Returns missing-font and node-count results to the UI
 
@@ -63,8 +64,10 @@ sequenceDiagram
   U->>UI: Drop source file
   UI->>P: ArrayBuffer + options
   P-->>UI: IR document + report
-  UI->>M: import-document
-  M->>M: Resolve fonts and assets
+  UI->>M: requested font list
+  M-->>UI: exact matches + missing-font replacements
+  UI->>M: import-document + replacement map
+  M->>M: Load selected fonts and assets
   M->>C: Create native nodes
   M-->>UI: Result + missing fonts
   UI-->>U: Completion summary
@@ -79,7 +82,9 @@ Embedded source images are represented as `Uint8Array` assets. The plugin bridge
 - Invalid container or XML: stop parsing and show a user-facing error.
 - Unsupported local object: rasterize or skip according to import settings.
 - Missing image relationship: skip the object and add a report warning.
-- Missing font: use an available fallback and return the original family/style in the result.
+- Missing font: stop at the pre-import replacement panel until the user selects an available family/style.
+- Unsupported Photoshop adjustment: preserve the source adjustment layer marker, apply every compatible native image filter, and report the non-equivalent fields.
+- Complex soft mask: preserve its rendered alpha in the smallest independent image layer while keeping blend mode and uniform opacity native.
 - Renderer failure: remove every root node created by the current import, preserve the parser report, and surface the source-node path with the Figma API error.
 
 ## Security and Privacy

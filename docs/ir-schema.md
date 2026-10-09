@@ -35,7 +35,23 @@ Every parser returns one or more page-level frames. Assets are stored once and r
 | `line` | `LineNode` |
 | `booleanGroup` | Non-clipping frame in V0.1 |
 
-Common fields carry identity, bounds, rotation, opacity, visibility, blend mode, paints, strokes, and effects. Container nodes add ordered children.
+Common fields carry identity, bounds, rotation, opacity, visibility, blend mode, paints, strokes, effects, and optional Figma mask semantics. Container nodes add ordered children.
+
+Image nodes and image paints may carry native Figma image filters:
+
+```ts
+interface ImageFilterValues {
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  temperature?: number;
+  tint?: number;
+  highlights?: number;
+  shadows?: number;
+}
+```
+
+Every value is normalized to `-1...1`. Mask nodes use `isMask` plus `maskType` (`alpha`, `vector`, or `luminance`).
 
 ## Coordinate Rules
 

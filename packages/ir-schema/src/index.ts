@@ -32,9 +32,20 @@ export interface ImagePaint {
   assetRef: string;
   scaleMode?: "fill" | "fit" | "crop" | "tile";
   opacity?: number;
+  filters?: ImageFilterValues;
 }
 
 export type Paint = SolidPaint | ImagePaint;
+
+export interface ImageFilterValues {
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  temperature?: number;
+  tint?: number;
+  highlights?: number;
+  shadows?: number;
+}
 
 export interface Stroke {
   color: Color;
@@ -76,6 +87,8 @@ export interface BaseNode {
   strokes?: Stroke[];
   effects?: Effect[];
   locked?: boolean;
+  isMask?: boolean;
+  maskType?: "alpha" | "vector" | "luminance";
 }
 
 export interface ContainerNode extends BaseNode {
@@ -137,6 +150,7 @@ export interface ImageNode extends BaseNode {
   type: "image";
   assetRef: string;
   scaleMode?: "fill" | "fit" | "crop" | "tile";
+  filters?: ImageFilterValues;
 }
 
 export type IRNode = ContainerNode | TextNode | ShapeNode | VectorNode | SvgNode | ImageNode;

@@ -18,10 +18,12 @@ Easy to Figma is a free, open-source, cross-platform Figma import tool. Source f
 | Format | Editable output | Controlled fallback |
 | --- | --- | --- |
 | PPTX | Slides, text, basic shapes, images, simple tables, groups | Advanced charts, SmartArt, animation |
-| PSD | Layer groups, text, visibility, opacity, blend modes | Pixel layers, complex styles and filters |
+| PSD | Layer groups, text, visibility, opacity, blend modes, pixel/vector masks, compatible image adjustments | Pixel layers and complex effects without a Figma equivalent |
 | AI / SVG | Artboards, same-named groups, paths, text, gradients, blend modes, embedded images | Empty source groups and private effects without an equivalent are reported |
 
-> PDF-compatible AI files are read directly for artboards and Illustrator PDF layers. The plugin rebuilds same-named real Figma Groups, editable text and vectors, and separate image layers. Figma cannot create empty Group nodes, so named empty source layers are omitted and reported. Private AI files without PDF-compatible data must still be saved as SVG.
+> PDF-compatible AI files are read directly for artboards and Illustrator PDF layers. The plugin rebuilds same-named real Figma Groups, editable text and vectors, and separate image layers. Image blend modes and uniform opacity are restored as native Figma properties, while complex soft masks and blur stay inside the corresponding independent visual layer. Figma cannot create empty Group nodes, so named empty source layers are omitted and reported. Private AI files without PDF-compatible data must still be saved as SVG.
+
+Before import, every text layer and rich-text run is checked by exact font family and style. Missing fonts are listed individually and require an explicit replacement instead of being substituted silently.
 
 File limits are 500 MB for PPTX / PSD and 1.5 GB for AI / SVG / PDF-compatible AI. Multiple files and ZIP bundles can be imported together. When no usable PDF layer hierarchy exists, visual fallback remains losslessly tiled at 4096px without scaling or exceeding Figma image limits.
 
@@ -75,7 +77,7 @@ Read the [architecture](./docs/architecture.md), [IR schema](./docs/ir-schema.md
 
 ## Project Status
 
-Version `v0.1.3` establishes the complete import path for all three source families. Pure plugin import was verified with two original Illustrator files up to 909 MB: all 11 artboards retain their Frames and source-named Groups, produce editable text, vectors, and image layers, and leave no temporary wrapper Frames. Current work focuses on compatibility with more real-world files, more accurate text and complex-mask mapping, and a broader public fixture suite.
+Version `v0.1.4` adds exact pre-import font checks and explicit replacements, native blend mode and opacity restoration for AI image layers, and PSD pixel masks, vector masks, and Figma's seven native image adjustment fields. The existing 11-artboard Illustrator regression suite still covers source files up to 909 MB, and a real 58.77 MB PSD now covers adjustment-layer import. Hue, per-channel curves, LUTs, and other settings without a Figma equivalent remain explicit report items.
 
 ## Contributing
 

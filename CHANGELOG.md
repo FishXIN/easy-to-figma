@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-09
+
+### Added / 新增
+
+- Added exact pre-import font analysis for base text and rich-text runs, with one required replacement selector per missing family/style pair / 新增导入前精确字体分析，覆盖基础文字与富文本样式段，并为每个缺失的字体族/样式提供必选替换项
+- Added native Figma image adjustments for PSD exposure, contrast, saturation, temperature, tint, highlights, and shadows / 新增 PSD 到 Figma 原生图片调整参数的映射，覆盖曝光、对比度、饱和度、色温、色调、高光和阴影
+- Added native Figma luminance-mask reconstruction for Photoshop pixel and vector masks, including density and feather / 新增 Photoshop 像素蒙版与矢量蒙版到 Figma 原生亮度蒙版的重建，包含密度和羽化
+- Added masked PSD adjustment overlays so compatible filters apply only inside the source adjustment mask / 新增带蒙版 PSD 调整层的遮罩叠加结构，使兼容滤镜仅作用于源蒙版区域
+
+### Changed / 变更
+
+- PDF image-layer blend modes and uniform opacity are now native Figma properties; baked alpha is normalized first to prevent double transparency / PDF 图像层混合模式与统一透明度改为 Figma 原生属性，并先还原像素 Alpha 以避免双重透明
+- Complex PDF soft masks and blur remain visually preserved in their independent image layers and are explicitly reported / 复杂 PDF 软蒙版和模糊保留在对应独立图像层内，并明确写入转换报告
+- Font substitutions now use only the user's explicit pre-import choice and return detailed source-to-replacement mappings / 字体替换仅使用用户在导入前的明确选择，并返回完整的源字体到替代字体映射
+
+### Verified / 验证
+
+- Regressed the 243 MB Poster AI and 909 MB BG AI: 11 artboards, zero whole-layer raster fallback, and 27 independent soft-mask/blur effect layers preserved / 回归 243 MB Poster AI 与 909 MB BG AI：共 11 个画板、零整层栅格回退，并保留 27 个独立软蒙版/模糊效果层
+- Regressed a real 58.77 MB Windows PSD with six adjustment layers; brightness/contrast, saturation, and color balance map to native image filters, while the one unsupported master-hue value is reported / 回归 Windows 端 58.77 MB 真实 PSD 的 6 个调整层；亮度/对比度、饱和度与色彩平衡均映射为原生图片调整，仅 1 个无等价项的主色相值被报告
+- Verified a generated PSD fixture containing both a masked adjustment layer and a masked pixel layer / 验证同时包含带蒙版调整层与带蒙版像素层的 PSD 测试样本
+
+### Known limitations / 已知限制
+
+- Figma has no native equivalent for Photoshop hue rotation, per-color/per-channel corrections, LUTs, gradient maps, threshold, or posterize; these remain explicit report items / Figma 没有 Photoshop 色相旋转、分色/分通道校正、LUT、渐变映射、阈值或色调分离的原生等价项，这些内容会保留为明确报告项
+
 ## [0.1.3] - 2026-10-09
 
 ### Added / 新增
@@ -81,7 +106,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Unit tests, type checking, production build, and dependency security checks
 - Bilingual project documentation and community health files
 
-[Unreleased]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.0...v0.1.1

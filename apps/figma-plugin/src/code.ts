@@ -1,8 +1,22 @@
-import { renderDocument } from "@easy-to-figma/figma-renderer";
+import {
+  analyzeRequestedFonts,
+  renderDocument,
+  type FontDescriptor,
+  type FontReplacementMap,
+} from "@easy-to-figma/figma-renderer";
 import type { IRDocument } from "@easy-to-figma/ir-schema";
 
 type PluginMessage =
-  | { type: "import-document"; document: IRDocument }
+  | {
+      type: "analyze-fonts";
+      requestId: number;
+      requestedFonts: FontDescriptor[];
+    }
+  | {
+      type: "import-document";
+      document: IRDocument;
+      fontReplacements: FontReplacementMap;
+    }
   | { type: "resize"; width: number; height: number }
   | { type: "close" };
 
@@ -26,10 +40,29 @@ figma.ui.onmessage = async (message: PluginMessage) => {
     return;
   }
 
-  if (message.type !== "import-document") return;
+  if (message.type === "analyze-fonts") {
+    try {
+      const analysis = await analyzeRequestedFonts(message.requestedFonts);
+      figma.ui.postMessage({
+        type: "font-analysis-complete",
+        requestId: message.requestId,
+        analysis,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown font analysis error";
+      figma.ui.postMessage({
+        type: "font-analysis-error",
+        requestId: message.requestId,
+        message: detail,
+      });
+    }
+    return;
+  }
 
   try {
-    const result = await renderDocument(message.document);
+    const result = await renderDocument(message.document, {
+      fontReplacements: message.fontReplacements,
+    });
     figma.ui.postMessage({
       type: "import-complete",
       result,

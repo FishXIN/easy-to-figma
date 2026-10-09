@@ -14,6 +14,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  collectRequestedFonts,
+  fontKey,
+  type FontAnalysis,
+  type FontDescriptor,
+  type FontReplacementMap,
+  type FontSubstitution,
+} from "@easy-to-figma/figma-renderer";
+import {
   parseIllustrator,
   type IllustratorParseProgress,
 } from "@easy-to-figma/parser-ai";
@@ -27,13 +35,21 @@ import {
 } from "@easy-to-figma/ir-schema";
 import JSZip from "jszip";
 
-type Status = "idle" | "parsing" | "ready" | "importing" | "success" | "error";
+type Status =
+  | "idle"
+  | "parsing"
+  | "analyzing"
+  | "ready"
+  | "importing"
+  | "success"
+  | "error";
 type FileFormat = "pptx" | "psd" | "ai";
 
 interface ImportResult {
   pageCount: number;
   nodeCount: number;
   missingFonts: string[];
+  fontSubstitutions: FontSubstitution[];
 }
 
 const MAX_STANDARD_FILE_SIZE = 500 * 1024 * 1024;
@@ -164,6 +180,7 @@ function FormatIcon({ format }: { format: FileFormat }) {
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const fontAnalysisRequestRef = useRef(0);
   const [status, setStatus] = useState<Status>("idle");
   const [isDragging, setIsDragging] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
@@ -174,6 +191,8 @@ export function App() {
   const [options, setOptions] = useState<ParseOptions>(DEFAULT_PARSE_OPTIONS);
   const [parseProgress, setParseProgress] = useState<IllustratorParseProgress>();
   const [showReport, setShowReport] = useState(false);
+  const [fontAnalysis, setFontAnalysis] = useState<FontAnalysis>();
+  const [fontReplacements, setFontReplacements] = useState<FontReplacementMap>({});
   const file = files[0];
   const totalFileSize = files.reduce((total, current) => total + current.size, 0);
   const fileLabel = files.length === 1 ? file?.name ?? "" : `${files.length} files selected`;
@@ -192,12 +211,33 @@ export function App() {
         setError(message.message ?? "Figma could not create the imported layers.");
         setStatus("error");
       }
+      if (
+        message?.type === "font-analysis-complete" &&
+        message.requestId === fontAnalysisRequestRef.current
+      ) {
+        const analysis = message.analysis as FontAnalysis;
+        setFontAnalysis(analysis);
+        setFontReplacements(
+          Object.fromEntries(
+            analysis.missingFonts.map((missing) => [missing.key, missing.suggested]),
+          ),
+        );
+        setStatus("ready");
+      }
+      if (
+        message?.type === "font-analysis-error" &&
+        message.requestId === fontAnalysisRequestRef.current
+      ) {
+        setError(message.message ?? "Figma could not inspect the available fonts.");
+        setStatus("error");
+      }
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
   }, []);
 
   const reset = useCallback(() => {
+    fontAnalysisRequestRef.current += 1;
     setStatus("idle");
     setFiles([]);
     setFormat(undefined);
@@ -206,6 +246,8 @@ export function App() {
     setError("");
     setParseProgress(undefined);
     setShowReport(false);
+    setFontAnalysis(undefined);
+    setFontReplacements({});
     if (inputRef.current) inputRef.current.value = "";
   }, []);
 
@@ -227,6 +269,8 @@ export function App() {
       setDocument(undefined);
       setResult(undefined);
       setParseProgress(undefined);
+      setFontAnalysis(undefined);
+      setFontReplacements({});
       try {
         const expandedFiles = await expandSelectedFiles(nextFiles);
         const detectedFormats = expandedFiles.map((nextFile) => detectFormat(nextFile));
@@ -255,8 +299,27 @@ export function App() {
           const parsed = await parseFile(nextFile, nextFormat, options, setParseProgress);
           parsedDocuments.push(parsed);
         }
-        setDocument(mergeDocuments(parsedDocuments, expandedFiles));
-        setStatus("ready");
+        const mergedDocument = mergeDocuments(parsedDocuments, expandedFiles);
+        const requestedFonts = collectRequestedFonts(mergedDocument);
+        setDocument(mergedDocument);
+        setStatus("analyzing");
+        const requestId = fontAnalysisRequestRef.current + 1;
+        fontAnalysisRequestRef.current = requestId;
+        sendToPlugin({ type: "analyze-fonts", requestId, requestedFonts });
+        if (window.parent === window) {
+          const fallbackFont = requestedFonts[0] ?? { family: "Inter", style: "Regular" };
+          window.setTimeout(() => {
+            if (fontAnalysisRequestRef.current !== requestId) return;
+            setFontAnalysis({
+              requestedFonts,
+              availableFonts: requestedFonts,
+              missingFonts: [],
+              fallbackFont,
+            });
+            setFontReplacements({});
+            setStatus("ready");
+          }, 250);
+        }
       } catch (parseError) {
         setError(parseError instanceof Error ? parseError.message : "The file could not be parsed.");
         setStatus("error");
@@ -266,15 +329,16 @@ export function App() {
   );
 
   const importDocument = () => {
-    if (!document) return;
+    if (!document || !fontAnalysis) return;
     setStatus("importing");
-    sendToPlugin({ type: "import-document", document });
+    sendToPlugin({ type: "import-document", document, fontReplacements });
     if (window.parent === window) {
       window.setTimeout(() => {
         setResult({
           pageCount: document.pages.length,
           nodeCount: document.report.parsedNodes,
           missingFonts: [],
+          fontSubstitutions: [],
         });
         setStatus("success");
       }, 700);
@@ -289,6 +353,8 @@ export function App() {
     parseProgress?.pageCount && parseProgress.page > 0
       ? `${parseProgress.phase === "encoding" ? "Encoding" : "Rendering"} artboard ${parseProgress.page} of ${parseProgress.pageCount}`
       : "Resolving document structure";
+  const unresolvedFontCount =
+    fontAnalysis?.missingFonts.filter((missing) => !fontReplacements[missing.key]).length ?? 0;
 
   return (
     <main className="app-shell">
@@ -416,7 +482,12 @@ export function App() {
         </>
       )}
 
-      {(status === "parsing" || status === "ready" || status === "importing") && file && format && (
+      {(status === "parsing" ||
+        status === "analyzing" ||
+        status === "ready" ||
+        status === "importing") &&
+        file &&
+        format && (
         <section className="work-area">
           <div className="file-summary">
             <span className={`format-icon format-${format}`}>
@@ -454,7 +525,18 @@ export function App() {
             </div>
           )}
 
-          {status === "ready" && document && report && (
+          {status === "analyzing" && (
+            <div className="progress-state" role="status">
+              <span className="spinner" />
+              <strong>Checking source fonts</strong>
+              <p>Matching every family and style against fonts available in Figma.</p>
+              <span className="progress-track">
+                <span />
+              </span>
+            </div>
+          )}
+
+          {status === "ready" && document && report && fontAnalysis && (
             <>
               <div className="ready-state">
                 <span className="status-check" aria-hidden="true">
@@ -484,6 +566,57 @@ export function App() {
                 </div>
               </div>
 
+              {fontAnalysis.missingFonts.length > 0 && (
+                <section className="font-replacement-panel" aria-labelledby="missing-fonts-title">
+                  <div className="font-replacement-heading">
+                    <AlertCircle size={16} />
+                    <span>
+                      <strong id="missing-fonts-title">
+                        {fontAnalysis.missingFonts.length} missing font
+                        {fontAnalysis.missingFonts.length === 1 ? "" : "s"}
+                      </strong>
+                      <small>Choose a replacement before importing.</small>
+                    </span>
+                  </div>
+                  <div className="font-replacement-list">
+                    {fontAnalysis.missingFonts.map((missing) => (
+                      <label className="font-replacement-row" key={missing.key}>
+                        <span title={`${missing.requested.family} ${missing.requested.style}`}>
+                          <strong>{missing.requested.family}</strong>
+                          <small>{missing.requested.style}</small>
+                        </span>
+                        <select
+                          aria-label={`Replace ${missing.requested.family} ${missing.requested.style}`}
+                          value={
+                            fontReplacements[missing.key]
+                              ? fontKey(fontReplacements[missing.key]!)
+                              : ""
+                          }
+                          onChange={(event) => {
+                            const replacement = fontAnalysis.availableFonts.find(
+                              (font) => fontKey(font) === event.target.value,
+                            );
+                            setFontReplacements((current) => {
+                              const next = { ...current };
+                              if (replacement) next[missing.key] = replacement;
+                              else delete next[missing.key];
+                              return next;
+                            });
+                          }}
+                        >
+                          <option value="">Choose replacement</option>
+                          {fontAnalysis.availableFonts.map((font) => (
+                            <option key={fontKey(font)} value={fontKey(font)}>
+                              {font.family} · {font.style}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+              )}
+
               <button
                 className="report-toggle"
                 type="button"
@@ -511,9 +644,16 @@ export function App() {
                 </div>
               )}
 
-              <button className="primary-button" type="button" onClick={importDocument}>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={importDocument}
+                disabled={unresolvedFontCount > 0}
+              >
                 <Import size={17} />
-                Import to canvas
+                {unresolvedFontCount > 0
+                  ? `Choose ${unresolvedFontCount} font replacement${unresolvedFontCount === 1 ? "" : "s"}`
+                  : "Import to canvas"}
               </button>
             </>
           )}
@@ -552,10 +692,20 @@ export function App() {
               Font swaps
             </span>
           </div>
-          {result.missingFonts.length > 0 && (
+          {result.fontSubstitutions.length > 0 && (
             <div className="font-warning">
               <AlertCircle size={16} />
-              <span>{result.missingFonts.join(", ")} replaced with an available font.</span>
+              <span>
+                {result.fontSubstitutions
+                  .map(
+                    ({ requested, replacement }: {
+                      requested: FontDescriptor;
+                      replacement: FontDescriptor;
+                    }) =>
+                      `${requested.family} ${requested.style} → ${replacement.family} ${replacement.style}`,
+                  )
+                  .join("; ")}
+              </span>
             </div>
           )}
           <button className="primary-button" type="button" onClick={reset}>
