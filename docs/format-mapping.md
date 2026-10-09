@@ -8,7 +8,7 @@
 | Text box | `text` | Text |
 | Rectangle / ellipse / polygon | shape node | Native shape |
 | Picture | `image` + asset | Rectangle with image fill |
-| Group | `group` | Non-clipping frame |
+| Group | `group` | Real Figma Group |
 | Simple table | grouped cells and text | Shapes and text |
 
 Coordinates are converted from English Metric Units at `9525 EMU = 1 px`. Direct RGB and basic theme colors are resolved during parsing.
@@ -46,16 +46,18 @@ Complex masks, Smart Objects, adjustment layers, filters, and layer styles are t
 | Text | `text` | Text |
 | Embedded image | `image` + asset | Rectangle with image fill |
 
-SVG is the editable compatibility path. Basic translate transforms, fills, strokes, opacity, and visibility are retained.
+SVG keeps source groups, child order, editable text containers and styled `tspan` runs. Complex vector leaves remain native SVG fragments during parsing and are unwrapped after Figma converts them.
 
 Native `.ai` files are supported when either:
 
 1. The payload is SVG-compatible.
 2. The file was saved with PDF compatibility.
 
-PDF-compatible files are rendered per artboard at 2x and listed as fallback content. Files are read through Blob URLs instead of being copied into one large buffer. Raster output larger than 4096px is split into lossless, aligned tiles so Figma can retain the original artboard dimensions without exceeding image limits.
+PDF-compatible files use PDF Optional Content Groups to recover same-named Illustrator layers. Modern PDF.js provides one operator list per artboard; the plugin separates editable text, source images and vector drawing operators, then rebuilds each non-empty source layer as a real Figma Group in the original order.
 
-The plugin reports loading, rendering, and PNG encoding progress for each artboard. This is intentional: reconstructing arbitrary PDF drawing operators into clean editable layers without the Illustrator object model would create unreliable output.
+Vector operators are converted locally into bounded SVG leaves with transforms, clipping, fills, strokes, opacity, blend modes and axial/radial gradients. Temporary SVG Frames and staging Frames are removed before the import completes. If a file exposes no usable layer hierarchy, the existing 2x visual fallback remains available and oversized output is split into aligned 4096px tiles.
+
+Figma cannot create an empty Group. Named empty Illustrator layers are therefore omitted and recorded in the conversion report instead of being replaced with fake placeholder content.
 
 ## Text Strategy
 
@@ -65,9 +67,10 @@ If the exact font is unavailable, the renderer tries:
 
 1. Requested family and style
 2. Requested family Regular
-3. Inter Regular
-4. Arial Regular
-5. First available Figma font
+3. Known compatible system substitutions
+4. Inter Regular
+5. Arial Regular
+6. First available Figma font
 
 Every substitution is returned to the UI.
 

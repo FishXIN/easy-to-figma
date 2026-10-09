@@ -1,6 +1,6 @@
 {
   "name": "@easy-to-figma/plugin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
     "@easy-to-figma/parser-ai": "*",
     "@easy-to-figma/parser-pptx": "*",
     "@easy-to-figma/parser-psd": "*",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.577.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

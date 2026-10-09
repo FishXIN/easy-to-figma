@@ -7,6 +7,8 @@ dist/
 !.env.example
 coverage/
 .vite/
+.artifacts/
+figma-import/
 *.figplug
 *.tgz
 .idea/

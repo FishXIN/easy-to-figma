@@ -25,6 +25,7 @@ import {
   type ImportReport,
   type ParseOptions,
 } from "@easy-to-figma/ir-schema";
+import JSZip from "jszip";
 
 type Status = "idle" | "parsing" | "ready" | "importing" | "success" | "error";
 type FileFormat = "pptx" | "psd" | "ai";
@@ -70,6 +71,35 @@ function detectFormat(file: File): FileFormat | undefined {
   return undefined;
 }
 
+function isZipFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith(".zip");
+}
+
+async function expandSelectedFiles(files: File[]): Promise<File[]> {
+  const expanded: File[] = [];
+  for (const file of files) {
+    if (!isZipFile(file)) {
+      expanded.push(file);
+      continue;
+    }
+    const archive = await JSZip.loadAsync(file);
+    const entries = Object.values(archive.files)
+      .filter((entry) => !entry.dir && /\.(pptx|psd|ai|svg|pdf)$/i.test(entry.name))
+      .sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
+    for (const entry of entries) {
+      const data = await entry.async("uint8array");
+      const name = entry.name.split("/").pop() ?? entry.name;
+      const buffer = new ArrayBuffer(data.byteLength);
+      new Uint8Array(buffer).set(data);
+      expanded.push(new File([buffer], name));
+    }
+  }
+  if (expanded.length === 0) {
+    throw new Error("The ZIP archive does not contain any supported source files.");
+  }
+  return expanded;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -93,6 +123,40 @@ async function parseFile(
   return parsePsd(buffer, file.name, options);
 }
 
+function mergeDocuments(documents: IRDocument[], files: File[]): IRDocument {
+  const [first] = documents;
+  if (!first) throw new Error("No documents were parsed.");
+  const missingFonts = new Set(documents.flatMap((document) => document.report.missingFonts));
+  const sourceName =
+    files.length === 1 ? files[0]?.name ?? first.source.name : `${files.length} selected files`;
+
+  return {
+    version: first.version,
+    source: {
+      name: sourceName,
+      format: first.source.format,
+      byteSize: files.reduce((total, file) => total + file.size, 0),
+    },
+    pages: documents.flatMap((document) => document.pages),
+    assets: documents.flatMap((document) => document.assets),
+    report: {
+      sourceFormat: first.report.sourceFormat,
+      sourceName,
+      parsedNodes: documents.reduce((total, document) => total + document.report.parsedNodes, 0),
+      editableNodes: documents.reduce((total, document) => total + document.report.editableNodes, 0),
+      rasterizedNodes: documents.reduce((total, document) => total + document.report.rasterizedNodes, 0),
+      skippedNodes: documents.reduce((total, document) => total + document.report.skippedNodes, 0),
+      missingFonts: [...missingFonts],
+      items: documents.flatMap((document) =>
+        document.report.items.map((item) => ({
+          ...item,
+          pageName: item.pageName ?? document.source.name,
+        })),
+      ),
+    },
+  };
+}
+
 function FormatIcon({ format }: { format: FileFormat }) {
   const Icon = formatDetails[format].icon;
   return <Icon aria-hidden="true" size={19} strokeWidth={1.8} />;
@@ -102,7 +166,7 @@ export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [isDragging, setIsDragging] = useState(false);
-  const [file, setFile] = useState<File>();
+  const [files, setFiles] = useState<File[]>([]);
   const [format, setFormat] = useState<FileFormat>();
   const [document, setDocument] = useState<IRDocument>();
   const [result, setResult] = useState<ImportResult>();
@@ -110,6 +174,9 @@ export function App() {
   const [options, setOptions] = useState<ParseOptions>(DEFAULT_PARSE_OPTIONS);
   const [parseProgress, setParseProgress] = useState<IllustratorParseProgress>();
   const [showReport, setShowReport] = useState(false);
+  const file = files[0];
+  const totalFileSize = files.reduce((total, current) => total + current.size, 0);
+  const fileLabel = files.length === 1 ? file?.name ?? "" : `${files.length} files selected`;
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -132,7 +199,7 @@ export function App() {
 
   const reset = useCallback(() => {
     setStatus("idle");
-    setFile(undefined);
+    setFiles([]);
     setFormat(undefined);
     setDocument(undefined);
     setResult(undefined);
@@ -142,34 +209,53 @@ export function App() {
     if (inputRef.current) inputRef.current.value = "";
   }, []);
 
-  const handleFile = useCallback(
-    async (nextFile: File) => {
-      const nextFormat = detectFormat(nextFile);
-      if (!nextFormat) {
-        setError("Choose a PPTX, PSD, AI, SVG or PDF-compatible AI file.");
-        setStatus("error");
-        return;
-      }
-      const sizeLimit =
-        nextFormat === "ai" ? MAX_ILLUSTRATOR_FILE_SIZE : MAX_STANDARD_FILE_SIZE;
-      if (nextFile.size > sizeLimit) {
+  const handleFiles = useCallback(
+    async (nextFiles: File[]) => {
+      if (nextFiles.length === 0) return;
+      const oversizedArchive = nextFiles.find(
+        (nextFile) => isZipFile(nextFile) && nextFile.size > MAX_ILLUSTRATOR_FILE_SIZE,
+      );
+      if (oversizedArchive) {
         setError(
-          `This file is larger than ${formatBytes(sizeLimit)}. Optimize it before importing.`,
+          `${oversizedArchive.name} is larger than ${formatBytes(MAX_ILLUSTRATOR_FILE_SIZE)}. Optimize it before importing.`,
         );
         setStatus("error");
         return;
       }
-
-      setFile(nextFile);
-      setFormat(nextFormat);
       setStatus("parsing");
       setError("");
       setDocument(undefined);
       setResult(undefined);
       setParseProgress(undefined);
       try {
-        const parsed = await parseFile(nextFile, nextFormat, options, setParseProgress);
-        setDocument(parsed);
+        const expandedFiles = await expandSelectedFiles(nextFiles);
+        const detectedFormats = expandedFiles.map((nextFile) => detectFormat(nextFile));
+        if (detectedFormats.some((detectedFormat) => detectedFormat === undefined)) {
+          throw new Error("Choose PPTX, PSD, AI, SVG, PDF-compatible AI or a ZIP bundle.");
+        }
+        const oversizedFile = expandedFiles.find((nextFile, index) => {
+          const sizeLimit =
+            detectedFormats[index] === "ai" ? MAX_ILLUSTRATOR_FILE_SIZE : MAX_STANDARD_FILE_SIZE;
+          return nextFile.size > sizeLimit;
+        });
+        if (oversizedFile) {
+          const oversizedFormat = detectFormat(oversizedFile);
+          const sizeLimit =
+            oversizedFormat === "ai" ? MAX_ILLUSTRATOR_FILE_SIZE : MAX_STANDARD_FILE_SIZE;
+          throw new Error(
+            `${oversizedFile.name} is larger than ${formatBytes(sizeLimit)}. Optimize it before importing.`,
+          );
+        }
+        setFiles(expandedFiles);
+        setFormat(detectedFormats[0]);
+        const parsedDocuments: IRDocument[] = [];
+        for (const [index, nextFile] of expandedFiles.entries()) {
+          const nextFormat = detectedFormats[index];
+          if (!nextFormat) continue;
+          const parsed = await parseFile(nextFile, nextFormat, options, setParseProgress);
+          parsedDocuments.push(parsed);
+        }
+        setDocument(mergeDocuments(parsedDocuments, expandedFiles));
         setStatus("ready");
       } catch (parseError) {
         setError(parseError instanceof Error ? parseError.message : "The file could not be parsed.");
@@ -238,15 +324,15 @@ export function App() {
             onDrop={(event) => {
               event.preventDefault();
               setIsDragging(false);
-              const droppedFile = event.dataTransfer.files[0];
-              if (droppedFile) void handleFile(droppedFile);
+              const droppedFiles = Array.from(event.dataTransfer.files);
+              if (droppedFiles.length > 0) void handleFiles(droppedFiles);
             }}
           >
             <div className="drop-icon" aria-hidden="true">
               <UploadCloud size={25} strokeWidth={1.7} />
             </div>
-            <h2>Drop a source file</h2>
-            <p>PPTX, PSD, AI, SVG or PDF-compatible AI</p>
+            <h2>Drop source files</h2>
+            <p>PPTX, PSD, AI, SVG, PDF-compatible AI or ZIP</p>
             <button className="secondary-button" type="button" onClick={() => inputRef.current?.click()}>
               Choose file
             </button>
@@ -254,10 +340,11 @@ export function App() {
               ref={inputRef}
               className="visually-hidden"
               type="file"
-              accept=".pptx,.psd,.ai,.svg,.pdf"
+              multiple
+              accept=".pptx,.psd,.ai,.svg,.pdf,.zip"
               onChange={(event) => {
-                const selectedFile = event.target.files?.[0];
-                if (selectedFile) void handleFile(selectedFile);
+                const selectedFiles = Array.from(event.target.files ?? []);
+                if (selectedFiles.length > 0) void handleFiles(selectedFiles);
               }}
             />
           </section>
@@ -336,9 +423,10 @@ export function App() {
               <FormatIcon format={format} />
             </span>
             <span className="file-name">
-              <strong title={file.name}>{file.name}</strong>
+              <strong title={files.map((current) => current.name).join("\n")}>{fileLabel}</strong>
               <small>
-                {formatDetails[format].label} · {formatBytes(file.size)}
+                {files.length === 1 ? formatDetails[format].label : "Batch import"} ·{" "}
+                {formatBytes(totalFileSize)}
               </small>
             </span>
             {status === "ready" && (
@@ -449,7 +537,7 @@ export function App() {
             <Check size={26} strokeWidth={2.4} />
           </span>
           <h2>Import complete</h2>
-          <p>{file.name} is now on the Figma canvas.</p>
+          <p>{fileLabel} {files.length === 1 ? "is" : "are"} now on the Figma canvas.</p>
           <div className="result-stats">
             <span>
               <strong>{result.pageCount}</strong>

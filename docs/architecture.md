@@ -44,7 +44,7 @@ The main thread owns document mutation:
 | `ir-schema` | Shared node, asset, paint, effect, and report contracts |
 | `parser-pptx` | Open XML package parsing and slide conversion |
 | `parser-psd` | PSD layer-tree parsing and per-layer fallback |
-| `parser-ai` | SVG conversion and PDF-compatible AI rendering |
+| `parser-ai` | Editable SVG conversion and PDF-compatible AI hierarchy reconstruction |
 | `figma-renderer` | IR-to-Figma node creation |
 | `figma-plugin` | User interface and UI/main-thread messaging |
 
@@ -72,9 +72,7 @@ sequenceDiagram
 
 ## Asset Transport
 
-Embedded source images are represented as data URLs in V0.1. The UI can serialize these values safely through the plugin bridge, and the renderer converts their base64 payload into Figma image hashes.
-
-Future large-file work should replace repeated data URLs with transferable binary chunks or an indexed asset channel.
+Embedded source images are represented as `Uint8Array` assets. The plugin bridge transports those bytes directly, and the renderer converts them into Figma image hashes without base64 expansion.
 
 ## Failure Model
 
@@ -82,7 +80,7 @@ Future large-file work should replace repeated data URLs with transferable binar
 - Unsupported local object: rasterize or skip according to import settings.
 - Missing image relationship: skip the object and add a report warning.
 - Missing font: use an available fallback and return the original family/style in the result.
-- Renderer failure: preserve the parser report and surface the Figma API error.
+- Renderer failure: remove every root node created by the current import, preserve the parser report, and surface the source-node path with the Figma API error.
 
 ## Security and Privacy
 
@@ -90,4 +88,5 @@ Future large-file work should replace repeated data URLs with transferable binar
 - The plugin manifest allows no network domains.
 - File handling occurs in memory.
 - PDF.js is kept on a patched release and initialized with a bundled worker.
+- PDF drawing operators are converted by a bounded local SVG backend; no legacy PDF parser or script evaluator is shipped.
 - CI runs tests, type checks, production builds, and dependency review.

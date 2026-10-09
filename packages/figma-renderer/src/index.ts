@@ -26,6 +26,7 @@ interface RenderContext {
 
 type RenderedNode =
   | FrameNode
+  | GroupNode
   | TextNode
   | VectorNode
   | RectangleNode
@@ -173,6 +174,33 @@ function applyCommon(node: RenderedNode, source: IRNode, context: RenderContext)
   }
 }
 
+const FONT_SUBSTITUTIONS: Array<{
+  matches: RegExp;
+  candidates: FontName[];
+}> = [
+  {
+    matches: /singkaibeieg-bold-gb/i,
+    candidates: [
+      { family: "Xingkai SC", style: "Bold" },
+      { family: "Kaiti SC", style: "Bold" },
+    ],
+  },
+  {
+    matches: /sxsgys/i,
+    candidates: [
+      { family: "Songti SC", style: "Regular" },
+      { family: "Kaiti SC", style: "Regular" },
+    ],
+  },
+  {
+    matches: /biaoxiaozhilongzhuti-j/i,
+    candidates: [
+      { family: "Xingkai SC", style: "Bold" },
+      { family: "Kaiti SC", style: "Bold" },
+    ],
+  },
+];
+
 function chooseFont(source: IRTextNode, context: RenderContext): FontName {
   const requestedFamily = source.fontFamily?.trim() || context.fallbackFont.family;
   const requestedStyle = source.fontStyle?.trim() || "Regular";
@@ -181,13 +209,34 @@ function chooseFont(source: IRTextNode, context: RenderContext): FontName {
   const familyRegular = context.fonts.get(`${requestedFamily}::Regular`.toLowerCase());
   if (familyRegular) return familyRegular;
   context.missingFonts.add(`${requestedFamily} ${requestedStyle}`);
+  const substitution = FONT_SUBSTITUTIONS.find(({ matches }) => matches.test(requestedFamily));
+  for (const candidate of substitution?.candidates ?? []) {
+    const available = context.fonts.get(`${candidate.family}::${candidate.style}`.toLowerCase());
+    if (available) return available;
+  }
   return context.fallbackFont;
 }
 
 async function createText(source: IRTextNode, context: RenderContext): Promise<TextNode> {
   const node = figma.createText();
   const fontName = chooseFont(source, context);
-  await figma.loadFontAsync(fontName);
+  const styledRuns = (source.runs ?? []).map((run) => ({
+    ...run,
+    fontName: chooseFont(
+      {
+        ...source,
+        fontFamily: run.fontFamily ?? source.fontFamily,
+        fontStyle: run.fontStyle ?? source.fontStyle,
+      },
+      context,
+    ),
+  }));
+  const fonts = new Map<string, FontName>();
+  fonts.set(`${fontName.family}::${fontName.style}`, fontName);
+  for (const run of styledRuns) {
+    fonts.set(`${run.fontName.family}::${run.fontName.style}`, run.fontName);
+  }
+  await Promise.all([...fonts.values()].map((font) => figma.loadFontAsync(font)));
   node.fontName = fontName;
   node.characters = source.characters;
   node.fontSize = Math.max(1, source.fontSize ?? 16);
@@ -202,6 +251,27 @@ async function createText(source: IRTextNode, context: RenderContext): Promise<T
       ? { unit: "AUTO" }
       : { unit: "PIXELS", value: source.lineHeight };
   node.letterSpacing = { unit: "PIXELS", value: source.letterSpacing ?? 0 };
+  for (const run of styledRuns) {
+    const start = Math.max(0, Math.min(node.characters.length, run.start));
+    const end = Math.max(start, Math.min(node.characters.length, run.end));
+    if (end <= start) continue;
+    node.setRangeFontName(start, end, run.fontName);
+    if (run.fontSize !== undefined) {
+      node.setRangeFontSize(start, end, Math.max(1, run.fontSize));
+    }
+    if (run.letterSpacing !== undefined) {
+      node.setRangeLetterSpacing(start, end, { unit: "PIXELS", value: run.letterSpacing });
+    }
+    if (run.textDecoration !== undefined) {
+      node.setRangeTextDecoration(start, end, run.textDecoration.toUpperCase() as TextDecoration);
+    }
+    if (run.fills) {
+      const fills = run.fills
+        .map((paint) => toPaint(paint, context))
+        .filter((paint): paint is SolidPaint | ImagePaint => paint !== undefined);
+      if (fills.length > 0) node.setRangeFills(start, end, fills);
+    }
+  }
   return node;
 }
 
@@ -225,13 +295,19 @@ function createVector(source: Extract<IRNode, { type: "vector" }>): VectorNode {
   return node;
 }
 
+function countRenderedTree(node: SceneNode): number {
+  if (!("children" in node)) return 1;
+  return 1 + node.children.reduce((total, child) => total + countRenderedTree(child), 0);
+}
+
 async function renderNode(
   source: IRNode,
-  parent: ChildrenMixin,
+  parent: BaseNode & ChildrenMixin,
   context: RenderContext,
-): Promise<SceneNode> {
+): Promise<SceneNode[]> {
   let node: RenderedNode;
-  if (source.type === "frame" || source.type === "group" || source.type === "booleanGroup") {
+  let renderedNodeCount = 1;
+  if (source.type === "frame" || source.type === "booleanGroup") {
     const frame = figma.createFrame();
     frame.clipsContent = source.clipsContent ?? false;
     frame.resize(Math.max(1, source.width), Math.max(1, source.height));
@@ -242,6 +318,80 @@ async function renderNode(
     for (const child of source.children) {
       await renderNode(child, frame, context);
     }
+  } else if (source.type === "group") {
+    const staging = figma.createFrame();
+    staging.name = "__easy_to_figma_staging__";
+    staging.fills = [];
+    staging.clipsContent = false;
+    staging.resize(Math.max(1, source.width), Math.max(1, source.height));
+    parent.appendChild(staging);
+    try {
+      for (const child of source.children) {
+        await renderNode(child, staging, context);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The child node could not be imported.";
+      throw new Error(`In source group "${source.name}": ${message}`);
+    }
+    const childNodes = [...staging.children];
+    if (childNodes.length === 0) {
+      staging.remove();
+      throw new Error(`Figma cannot create the empty source group "${source.name}".`);
+    }
+    const group = figma.group(childNodes, staging);
+    const localX = group.x;
+    const localY = group.y;
+    parent.appendChild(group);
+    group.x =
+      source.childCoordinateSpace === "page"
+        ? localX
+        : source.x + localX;
+    group.y =
+      source.childCoordinateSpace === "page"
+        ? localY
+        : source.y + localY;
+    staging.remove();
+    node = group;
+    applyCommon(node, { ...source, x: group.x, y: group.y }, context);
+  } else if (source.type === "svg") {
+    let imported: FrameNode;
+    try {
+      imported = figma.createNodeFromSvg(source.markup);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to convert SVG file";
+      throw new Error(`The source SVG node "${source.name}" could not be imported: ${message}`);
+    }
+    imported.fills = [];
+    parent.appendChild(imported);
+    imported.x = source.x;
+    imported.y = source.y;
+    const importedChildren = [...imported.children];
+    if (importedChildren.length === 0) {
+      node = imported;
+      applyCommon(node, source, context);
+      renderedNodeCount = countRenderedTree(node);
+      context.nodeCount += renderedNodeCount;
+      return [node];
+    } else {
+      for (const child of importedChildren) {
+        const x = imported.x + child.x;
+        const y = imported.y + child.y;
+        parent.appendChild(child);
+        child.x = x;
+        child.y = y;
+      }
+      imported.remove();
+      if (importedChildren.length === 1) {
+        node = importedChildren[0]! as RenderedNode;
+        applyCommon(node, { ...source, x: node.x, y: node.y }, context);
+      }
+    }
+    renderedNodeCount = importedChildren.reduce(
+      (total, child) => total + countRenderedTree(child),
+      0,
+    );
+    context.nodeCount += renderedNodeCount;
+    return importedChildren;
   } else if (source.type === "text") {
     node = await createText(source, context);
     parent.appendChild(node);
@@ -272,8 +422,8 @@ async function renderNode(
     applyCommon(node, source, context);
   }
 
-  context.nodeCount += 1;
-  return node;
+  context.nodeCount += renderedNodeCount;
+  return [node];
 }
 
 export async function renderDocument(document: IRDocument): Promise<RenderResult> {
@@ -295,6 +445,7 @@ export async function renderDocument(document: IRDocument): Promise<RenderResult
     nodeCount: 0,
   };
   const renderedPages: SceneNode[] = [];
+  const existingRootNodes = new Set(figma.currentPage.children);
   const totalWidth =
     document.pages.reduce((total, page) => total + page.width, 0) +
     Math.max(0, document.pages.length - 1) * 120;
@@ -309,13 +460,21 @@ export async function renderDocument(document: IRDocument): Promise<RenderResult
       ? Math.max(...existingNodes.map((node) => node.y + node.height)) + 240
       : figma.viewport.center.y - Math.max(...document.pages.map((page) => page.height)) / 2;
 
-  for (const [pageIndex, page] of document.pages.entries()) {
-    const positionedPage = { ...page, x: cursorX, y: top };
-    const rendered = await renderNode(positionedPage, figma.currentPage, context);
-    rendered.setPluginData("easy-to-figma-source", document.source.name);
-    rendered.setPluginData("easy-to-figma-page", String(pageIndex + 1));
-    renderedPages.push(rendered);
-    cursorX += page.width + 120;
+  try {
+    for (const [pageIndex, page] of document.pages.entries()) {
+      const positionedPage = { ...page, x: cursorX, y: top };
+      const [rendered] = await renderNode(positionedPage, figma.currentPage, context);
+      if (!rendered) throw new Error(`The page "${page.name}" did not create a Figma frame.`);
+      rendered.setPluginData("easy-to-figma-source", document.source.name);
+      rendered.setPluginData("easy-to-figma-page", String(pageIndex + 1));
+      renderedPages.push(rendered);
+      cursorX += page.width + 120;
+    }
+  } catch (error) {
+    for (const child of [...figma.currentPage.children]) {
+      if (!existingRootNodes.has(child)) child.remove();
+    }
+    throw error;
   }
 
   figma.currentPage.selection = renderedPages;

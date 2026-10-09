@@ -19,11 +19,11 @@ Easy to Figma is a free, open-source, cross-platform Figma import tool. Source f
 | --- | --- | --- |
 | PPTX | Slides, text, basic shapes, images, simple tables, groups | Advanced charts, SmartArt, animation |
 | PSD | Layer groups, text, visibility, opacity, blend modes | Pixel layers, complex styles and filters |
-| AI / SVG | Artboards, paths, text, basic geometry, embedded images | PDF-compatible AI is rasterized per artboard |
+| AI / SVG | Artboards, same-named groups, paths, text, gradients, blend modes, embedded images | Empty source groups and private effects without an equivalent are reported |
 
-> Illustrator's private format does not have a complete, stable public specification. Save as SVG for editable paths. Files saved with “Create PDF Compatible File” can also be imported, with complex artwork preserved visually per artboard.
+> PDF-compatible AI files are read directly for artboards and Illustrator PDF layers. The plugin rebuilds same-named real Figma Groups, editable text and vectors, and separate image layers. Figma cannot create empty Group nodes, so named empty source layers are omitted and reported. Private AI files without PDF-compatible data must still be saved as SVG.
 
-File limits are 500 MB for PPTX / PSD and 1.5 GB for AI / SVG / PDF-compatible AI. Oversized AI artboards are tiled automatically without scaling or exceeding Figma image limits.
+File limits are 500 MB for PPTX / PSD and 1.5 GB for AI / SVG / PDF-compatible AI. Multiple files and ZIP bundles can be imported together. When no usable PDF layer hierarchy exists, visual fallback remains losslessly tiled at 4096px without scaling or exceeding Figma image limits.
 
 ## Principles
 
@@ -75,7 +75,7 @@ Read the [architecture](./docs/architecture.md), [IR schema](./docs/ir-schema.md
 
 ## Project Status
 
-Version `v0.1.2` establishes the complete import path for all three source families and has been verified with two real Illustrator files up to 909 MB. Current work focuses on compatibility with more real-world files, more accurate text and transform mapping, and a broader public fixture suite.
+Version `v0.1.3` establishes the complete import path for all three source families. Pure plugin import was verified with two original Illustrator files up to 909 MB: all 11 artboards retain their Frames and source-named Groups, produce editable text, vectors, and image layers, and leave no temporary wrapper Frames. Current work focuses on compatibility with more real-world files, more accurate text and complex-mask mapping, and a broader public fixture suite.
 
 ## Contributing
 

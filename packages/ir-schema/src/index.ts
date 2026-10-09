@@ -9,6 +9,7 @@ export type NodeType =
   | "ellipse"
   | "polygon"
   | "vector"
+  | "svg"
   | "image"
   | "line"
   | "booleanGroup";
@@ -80,8 +81,20 @@ export interface BaseNode {
 export interface ContainerNode extends BaseNode {
   type: "frame" | "group" | "booleanGroup";
   children: IRNode[];
+  childCoordinateSpace?: "relative" | "page";
   clipsContent?: boolean;
   cornerRadius?: number;
+}
+
+export interface TextStyleRun {
+  start: number;
+  end: number;
+  fontFamily?: string;
+  fontStyle?: string;
+  fontSize?: number;
+  letterSpacing?: number;
+  textDecoration?: "none" | "underline" | "strikethrough";
+  fills?: Paint[];
 }
 
 export interface TextNode extends BaseNode {
@@ -96,6 +109,7 @@ export interface TextNode extends BaseNode {
   textAlignVertical?: "top" | "center" | "bottom";
   textCase?: "original" | "upper" | "lower" | "title";
   textDecoration?: "none" | "underline" | "strikethrough";
+  runs?: TextStyleRun[];
 }
 
 export interface ShapeNode extends BaseNode {
@@ -114,13 +128,18 @@ export interface VectorNode extends BaseNode {
   vectorPaths: VectorPath[];
 }
 
+export interface SvgNode extends BaseNode {
+  type: "svg";
+  markup: string;
+}
+
 export interface ImageNode extends BaseNode {
   type: "image";
   assetRef: string;
   scaleMode?: "fill" | "fit" | "crop" | "tile";
 }
 
-export type IRNode = ContainerNode | TextNode | ShapeNode | VectorNode | ImageNode;
+export type IRNode = ContainerNode | TextNode | ShapeNode | VectorNode | SvgNode | ImageNode;
 
 export interface Asset {
   id: string;

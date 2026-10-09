@@ -37,9 +37,11 @@ The project is not a generic file-to-image converter. Its primary output is a Fi
 
 - SVG artboards and groups
 - Paths and basic geometry
-- Editable text
-- Embedded images
-- PDF-compatible AI visual fallback
+- Editable text and styled text runs
+- Embedded and PDF source images as independent layers
+- PDF-compatible AI artboards and same-named layer Groups
+- Editable PDF vectors, gradients, opacity, and blend modes
+- Per-artboard visual fallback only when no usable PDF layer hierarchy exists
 
 ### PSD
 
