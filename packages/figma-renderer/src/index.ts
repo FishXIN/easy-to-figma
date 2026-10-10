@@ -31,6 +31,7 @@ export interface MissingFont {
 export interface FontAnalysis {
   requestedFonts: FontDescriptor[];
   availableFonts: FontDescriptor[];
+  resolvedReplacements: FontReplacementMap;
   missingFonts: MissingFont[];
   fallbackFont: FontDescriptor;
 }
@@ -75,12 +76,78 @@ function toRgb(color: Color): RGB {
   };
 }
 
-function toPaint(paint: Paint, context: RenderContext): SolidPaint | ImagePaint | undefined {
+function invertGradientTransform(transform: Transform): Transform {
+  const [[a, c, e], [b, d, f]] = transform;
+  const determinant = a * d - b * c;
+  if (Math.abs(determinant) < 1e-8) {
+    return [
+      [1, 0, 0],
+      [0, 1, 0],
+    ];
+  }
+  return [
+    [
+      d / determinant,
+      -c / determinant,
+      (c * f - d * e) / determinant,
+    ],
+    [
+      -b / determinant,
+      a / determinant,
+      (b * e - a * f) / determinant,
+    ],
+  ];
+}
+
+function toGradientTransform(
+  gradientType: "linear" | "radial",
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+): Transform {
+  const deltaX = end.x - start.x;
+  const deltaY = end.y - start.y;
+  if (gradientType === "radial") {
+    return invertGradientTransform([
+      [2 * deltaX, -2 * deltaY, start.x - deltaX + deltaY],
+      [2 * deltaY, 2 * deltaX, start.y - deltaY - deltaX],
+    ]);
+  }
+  return invertGradientTransform([
+    [deltaX, -deltaY, start.x + deltaY / 2],
+    [deltaY, deltaX, start.y - deltaX / 2],
+  ]);
+}
+
+function toPaint(
+  paint: Paint,
+  context: RenderContext,
+): SolidPaint | ImagePaint | GradientPaint | undefined {
   if (paint.type === "solid") {
     return {
       type: "SOLID",
       color: toRgb(paint.color),
       opacity: paint.opacity ?? paint.color.a ?? 1,
+    };
+  }
+  if (paint.type === "gradient") {
+    return {
+      type:
+        paint.gradientType === "radial"
+          ? "GRADIENT_RADIAL"
+          : "GRADIENT_LINEAR",
+      opacity: paint.opacity ?? 1,
+      gradientStops: paint.stops.map((stop) => ({
+        position: Math.max(0, Math.min(1, stop.position)),
+        color: {
+          ...toRgb(stop.color),
+          a: stop.color.a ?? 1,
+        },
+      })),
+      gradientTransform: toGradientTransform(
+        paint.gradientType,
+        paint.start,
+        paint.end,
+      ),
     };
   }
 
@@ -174,8 +241,11 @@ function toEffects(effects: IREffect[] | undefined): readonly (DropShadowEffect 
   });
 }
 
-function mapBlendMode(value: string | undefined): BlendMode {
-  const normalized = value?.replace(/[-\s]/g, "_").toUpperCase();
+export function mapBlendMode(value: string | undefined): BlendMode {
+  const normalized = value
+    ?.replace(/^source-over$/i, "normal")
+    .replace(/[-\s]/g, "_")
+    .toUpperCase();
   const supported = new Set<BlendMode>([
     "PASS_THROUGH",
     "NORMAL",
@@ -208,7 +278,12 @@ function applyCommon(node: RenderedNode, source: IRNode, context: RenderContext)
   node.visible = source.visible ?? true;
   node.locked = source.locked ?? false;
   if ("rotation" in node) node.rotation = source.rotation ?? 0;
-  if ("blendMode" in node) node.blendMode = mapBlendMode(source.blendMode);
+  if ("blendMode" in node) {
+    node.blendMode =
+      source.blendMode === undefined && node.type === "GROUP"
+        ? "PASS_THROUGH"
+        : mapBlendMode(source.blendMode);
+  }
   if ("isMask" in node && source.isMask !== undefined) {
     node.isMask = source.isMask;
     if (source.maskType) node.maskType = source.maskType.toUpperCase() as MaskType;
@@ -217,7 +292,10 @@ function applyCommon(node: RenderedNode, source: IRNode, context: RenderContext)
   if ("fills" in node && source.fills) {
     node.fills = source.fills
       .map((paint) => toPaint(paint, context))
-      .filter((paint): paint is SolidPaint | ImagePaint => paint !== undefined);
+      .filter(
+        (paint): paint is SolidPaint | ImagePaint | GradientPaint =>
+          paint !== undefined,
+      );
   }
   if ("strokes" in node) {
     const stroke = toStrokes(source.strokes);
@@ -251,6 +329,25 @@ const FONT_SUBSTITUTIONS: Array<{
       { family: "Xingkai SC", style: "Bold" },
       { family: "Kaiti SC", style: "Bold" },
     ],
+  },
+];
+
+const FONT_EQUIVALENT_ALIASES: Array<{
+  matches: RegExp;
+  families: string[];
+}> = [
+  {
+    matches: /sxsgys/i,
+    families: [
+      "苏新诗古印宋简",
+      "SXS-GYSJ",
+      "FZSuXinShiGuYinSongS",
+      "方正苏新诗古印宋 简",
+    ],
+  },
+  {
+    matches: /biaoxiaozhilongzhuti-j/i,
+    families: ["标小智龙珠体 简", "标小智龙珠体", "BiaoXiaoZhiLongZhuTi"],
   },
 ];
 
@@ -317,6 +414,39 @@ function chooseSuggestedFont(
   return fallbackFont;
 }
 
+function findAvailableFamily(
+  family: string,
+  fonts: Map<string, FontDescriptor>,
+): FontDescriptor | undefined {
+  const normalizedFamily = family
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s._-]+/g, "");
+  const matches = [...fonts.values()].filter(
+    (font) =>
+      font.family
+        .normalize("NFKC")
+        .toLowerCase()
+        .replace(/[\s._-]+/g, "") === normalizedFamily,
+  );
+  return matches.find((font) => font.style.toLowerCase() === "regular") ?? matches[0];
+}
+
+function chooseEquivalentInstalledFont(
+  requested: FontDescriptor,
+  fonts: Map<string, FontDescriptor>,
+): FontDescriptor | undefined {
+  const sameFamily = findAvailableFamily(requested.family, fonts);
+  if (sameFamily) return sameFamily;
+
+  const aliases = FONT_EQUIVALENT_ALIASES.find(({ matches }) => matches.test(requested.family));
+  for (const family of aliases?.families ?? []) {
+    const available = findAvailableFamily(family, fonts);
+    if (available) return available;
+  }
+  return undefined;
+}
+
 export async function analyzeRequestedFonts(
   requestedFonts: FontDescriptor[],
   knownAvailableFonts?: FontDescriptor[],
@@ -339,16 +469,26 @@ export async function analyzeRequestedFonts(
     sortedAvailableFonts[0];
   if (!fallbackFont) throw new Error("No fonts are available in Figma.");
 
-  const missingFonts = requestedFonts
-    .filter((font) => !fonts.has(fontKey(font)))
-    .map((font) => ({
-      key: fontKey(font),
+  const resolvedReplacements: FontReplacementMap = {};
+  const missingFonts: MissingFont[] = [];
+  for (const font of requestedFonts) {
+    const key = fontKey(font);
+    if (fonts.has(key)) continue;
+    const equivalent = chooseEquivalentInstalledFont(font, fonts);
+    if (equivalent) {
+      resolvedReplacements[key] = equivalent;
+      continue;
+    }
+    missingFonts.push({
+      key,
       requested: font,
       suggested: chooseSuggestedFont(font, fonts, fallbackFont),
-    }));
+    });
+  }
   return {
     requestedFonts,
     availableFonts: sortedAvailableFonts,
+    resolvedReplacements,
     missingFonts,
     fallbackFont,
   };
@@ -423,6 +563,15 @@ async function createText(source: IRTextNode, context: RenderContext): Promise<T
     if (run.fontSize !== undefined) {
       node.setRangeFontSize(start, end, Math.max(1, run.fontSize));
     }
+    if (run.lineHeight !== undefined) {
+      node.setRangeLineHeight(
+        start,
+        end,
+        run.lineHeight === "auto"
+          ? { unit: "AUTO" }
+          : { unit: "PIXELS", value: Math.max(1, run.lineHeight) },
+      );
+    }
     if (run.letterSpacing !== undefined) {
       node.setRangeLetterSpacing(start, end, { unit: "PIXELS", value: run.letterSpacing });
     }
@@ -432,7 +581,10 @@ async function createText(source: IRTextNode, context: RenderContext): Promise<T
     if (run.fills) {
       const fills = run.fills
         .map((paint) => toPaint(paint, context))
-        .filter((paint): paint is SolidPaint | ImagePaint => paint !== undefined);
+        .filter(
+          (paint): paint is SolidPaint | ImagePaint | GradientPaint =>
+            paint !== undefined,
+        );
       if (fills.length > 0) node.setRangeFills(start, end, fills);
     }
   }
@@ -473,6 +625,7 @@ async function renderNode(
   let renderedNodeCount = 1;
   if (source.type === "frame" || source.type === "booleanGroup") {
     const frame = figma.createFrame();
+    frame.fills = [];
     frame.clipsContent = source.clipsContent ?? false;
     frame.resize(Math.max(1, source.width), Math.max(1, source.height));
     if (source.cornerRadius !== undefined) frame.cornerRadius = source.cornerRadius;
@@ -545,17 +698,15 @@ async function renderNode(
         child.y = y;
       }
       imported.remove();
-      if (importedChildren.length === 1) {
-        node = importedChildren[0]! as RenderedNode;
-        applyCommon(node, { ...source, x: node.x, y: node.y }, context);
-      }
+      node =
+        importedChildren.length === 1
+          ? importedChildren[0]! as RenderedNode
+          : figma.group(importedChildren, parent);
+      applyCommon(node, { ...source, x: node.x, y: node.y }, context);
     }
-    renderedNodeCount = importedChildren.reduce(
-      (total, child) => total + countRenderedTree(child),
-      0,
-    );
+    renderedNodeCount = countRenderedTree(node);
     context.nodeCount += renderedNodeCount;
-    return importedChildren;
+    return [node];
   } else if (source.type === "text") {
     node = await createText(source, context);
     parent.appendChild(node);

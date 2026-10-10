@@ -19,9 +19,9 @@ Easy to Figma is a free, open-source, cross-platform Figma import tool. Source f
 | --- | --- | --- |
 | PPTX | Slides, text, basic shapes, images, simple tables, groups | Advanced charts, SmartArt, animation |
 | PSD | Layer groups, text, visibility, opacity, blend modes, pixel/vector masks, compatible image adjustments | Pixel layers and complex effects without a Figma equivalent |
-| AI / SVG | Artboards, same-named groups, paths, text, gradients, blend modes, embedded images | Empty source groups and private effects without an equivalent are reported |
+| AI / SVG | Artboards, same-named groups, paths, text, gradients, blend modes, embedded images | Hidden empty layers are preserved as hidden Frames; private effects without an equivalent are reported |
 
-> PDF-compatible AI files are read directly for artboards and Illustrator PDF layers. The plugin rebuilds same-named real Figma Groups, editable text and vectors, and separate image layers. Image blend modes and uniform opacity are restored as native Figma properties, while complex soft masks and blur stay inside the corresponding independent visual layer. Figma cannot create empty Group nodes, so named empty source layers are omitted and reported. Private AI files without PDF-compatible data must still be saved as SVG.
+> PDF-compatible AI files are read directly for artboards and Illustrator PDF layers. The plugin rebuilds same-named real Figma Groups, editable text and vectors, and separate image layers. Image compositing is restored with native properties, while complex soft masks remain separate transparent overlays. Hidden empty layers are preserved as hidden Frames. Full-artboard visual background layers are locked by default so foreground content stays selectable, and remain editable after unlocking. Private AI files without PDF-compatible data must still be saved as SVG.
 
 Before import, every text layer and rich-text run is checked by exact font family and style. Missing fonts are listed individually and require an explicit replacement instead of being substituted silently.
 
@@ -77,7 +77,7 @@ Read the [architecture](./docs/architecture.md), [IR schema](./docs/ir-schema.md
 
 ## Project Status
 
-Version `v0.1.4` adds exact pre-import font checks and explicit replacements, native blend mode and opacity restoration for AI image layers, and PSD pixel masks, vector masks, and Figma's seven native image adjustment fields. The existing 11-artboard Illustrator regression suite still covers source files up to 909 MB, and a real 58.77 MB PSD now covers adjustment-layer import. Hue, per-channel curves, LUTs, and other settings without a Figma equivalent remain explicit report items.
+Version `v0.1.5` preserves hidden AI layers, merges wrapped lines from one paragraph, restores native background gradients and outer-group blend modes, and keeps soft-mask output as a separate transparent overlay. It also resolves installed PostScript/localized family aliases and non-standard font style labels. The 11-artboard Illustrator regression suite covers source files up to 909 MB; PSD masks and Figma's native image adjustments remain supported, while values without a Figma equivalent remain explicit report items.
 
 ## Contributing
 

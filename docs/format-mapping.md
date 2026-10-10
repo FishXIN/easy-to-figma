@@ -57,24 +57,26 @@ Smart Object internals and layer styles without deterministic native mappings re
 | Text | `text` | Text |
 | Embedded image | `image` + asset | Rectangle with image fill |
 
-SVG keeps source groups, child order, editable text containers and styled `tspan` runs. Complex vector leaves remain native SVG fragments during parsing and are unwrapped after Figma converts them.
+SVG keeps source groups, child order, editable text containers and styled `tspan` runs. Complex vector leaves remain native SVG fragments during parsing; Figma's generated implementation nodes are grouped under one source-named leaf instead of being exposed beside source layers.
 
 Native `.ai` files are supported when either:
 
 1. The payload is SVG-compatible.
 2. The file was saved with PDF compatibility.
 
-PDF-compatible files use PDF Optional Content Groups to recover same-named Illustrator layers. Modern PDF.js provides one operator list per artboard; the plugin separates editable text, source images and vector drawing operators, then rebuilds each non-empty source layer as a real Figma Group in the original order.
+PDF-compatible files use PDF Optional Content Groups to recover same-named Illustrator layers. Modern PDF.js provides one operator list per artboard; the plugin separates editable text, source images and vector drawing operators, then rebuilds source layers in the original order. Duplicate visible empty OCG placeholders are removed when the matching hidden source layer is present.
 
-Vector operators are converted locally into bounded SVG leaves with transforms, clipping, fills, strokes, opacity, blend modes and axial/radial gradients. Image segments restore PDF blend mode and uniform alpha as native Figma layer properties. Uniform alpha is removed from the PNG before applying node opacity, preventing double transparency. Complex soft masks and blur remain baked into the smallest independent visual layer. Temporary SVG Frames and staging Frames are removed before the import completes. If a file exposes no usable layer hierarchy, the existing 2x visual fallback remains available and oversized output is split into aligned 4096px tiles.
+Vector operators are converted locally into source-named SVG leaves with transforms, clipping, fills, strokes, opacity, blend modes and axial/radial gradients. Image segments restore PDF blend mode as a native Figma property. Soft-mask layers that require a backdrop are rebuilt as separate transparent overlays without merging the editable background gradient. Full-artboard visual layers such as `Picture`, `Effect`, `Sub_BG`, `BG_Mask`, and `BG_Color` are locked by default so they do not intercept foreground canvas selection; users can unlock them normally. Temporary SVG Frames and staging Frames are removed before the import completes. If a file exposes no usable layer hierarchy, the existing 2x visual fallback remains available and oversized output is split into aligned 4096px tiles.
 
-Figma cannot create an empty Group. Named empty Illustrator layers are therefore omitted and recorded in the conversion report instead of being replaced with fake placeholder content.
+Figma cannot create an empty Group. A named empty Illustrator layer is preserved as an empty Frame with its original visibility instead.
 
 ## Text Strategy
 
 Editable mode creates Figma text nodes and maps family, style, size, alignment, line height, and letter spacing when available.
 
-Before import, the UI sends the deduplicated family/style pairs from base text and rich-text runs to the Figma main thread. Exact installed matches are used unchanged. Every missing pair is listed in a replacement panel with an available-font selector; import remains disabled until each missing pair has a replacement. The final source-to-replacement mappings are returned in the import result.
+Before import, the UI sends the deduplicated family/style pairs from base text and rich-text runs to the Figma main thread. Exact installed matches are used unchanged. Installed faces with a non-standard style label and verified PostScript/localized-family aliases are resolved automatically. Every genuinely missing pair is listed in a replacement panel with an available-font selector; import remains disabled until each missing pair has a replacement. The final source-to-replacement mappings are returned in the import result.
+
+Visual mode renders each PDF-compatible AI artboard as a lossless 2x reference image. It is intended for source-fidelity comparison or an explicit non-editable fallback; editable mode remains the default.
 
 ## Unsupported Strategy
 

@@ -180,6 +180,7 @@ function FormatIcon({ format }: { format: FileFormat }) {
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const chooseFileButtonRef = useRef<HTMLButtonElement>(null);
   const fontAnalysisRequestRef = useRef(0);
   const [status, setStatus] = useState<Status>("idle");
   const [isDragging, setIsDragging] = useState(false);
@@ -218,9 +219,12 @@ export function App() {
         const analysis = message.analysis as FontAnalysis;
         setFontAnalysis(analysis);
         setFontReplacements(
-          Object.fromEntries(
-            analysis.missingFonts.map((missing) => [missing.key, missing.suggested]),
-          ),
+          {
+            ...analysis.resolvedReplacements,
+            ...Object.fromEntries(
+              analysis.missingFonts.map((missing) => [missing.key, missing.suggested]),
+            ),
+          },
         );
         setStatus("ready");
       }
@@ -235,6 +239,15 @@ export function App() {
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
   }, []);
+
+  useEffect(() => {
+    if (status !== "idle") return;
+    const timeout = window.setTimeout(() => {
+      window.focus();
+      chooseFileButtonRef.current?.focus();
+    });
+    return () => window.clearTimeout(timeout);
+  }, [status]);
 
   const reset = useCallback(() => {
     fontAnalysisRequestRef.current += 1;
@@ -313,6 +326,7 @@ export function App() {
             setFontAnalysis({
               requestedFonts,
               availableFonts: requestedFonts,
+              resolvedReplacements: {},
               missingFonts: [],
               fallbackFont,
             });
@@ -399,7 +413,13 @@ export function App() {
             </div>
             <h2>Drop source files</h2>
             <p>PPTX, PSD, AI, SVG, PDF-compatible AI or ZIP</p>
-            <button className="secondary-button" type="button" onClick={() => inputRef.current?.click()}>
+            <button
+              autoFocus
+              className="secondary-button"
+              ref={chooseFileButtonRef}
+              type="button"
+              onClick={() => inputRef.current?.click()}
+            >
               Choose file
             </button>
             <input

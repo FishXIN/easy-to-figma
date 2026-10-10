@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IR_VERSION, createReport, type IRDocument } from "@easy-to-figma/ir-schema";
-import { analyzeDocumentFonts, renderDocument } from "./index";
+import {
+  analyzeDocumentFonts,
+  analyzeRequestedFonts,
+  mapBlendMode,
+  renderDocument,
+} from "./index";
 
 class MockNode {
   children: MockNode[] = [];
@@ -49,6 +54,7 @@ class MockNode {
 
 class MockTextNode extends MockNode {
   characters = "";
+  rangeLineHeights: Array<[number, number, unknown]> = [];
   fontName: FontName = { family: "Inter", style: "Regular" };
   fontSize = 16;
   textAutoResize = "NONE";
@@ -65,6 +71,9 @@ class MockTextNode extends MockNode {
 
   setRangeFontName() {}
   setRangeFontSize() {}
+  setRangeLineHeight(start: number, end: number, value: unknown) {
+    this.rangeLineHeights.push([start, end, value]);
+  }
   setRangeLetterSpacing() {}
   setRangeTextDecoration() {}
   setRangeFills() {}
@@ -77,7 +86,10 @@ function createFigmaMock() {
       { fontName: { family: "Inter", style: "Regular" } },
     ],
     loadFontAsync: async () => undefined,
-    createFrame: () => new MockNode("FRAME"),
+    createFrame: () =>
+      Object.assign(new MockNode("FRAME"), {
+        fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }],
+      }),
     createText: () => new MockTextNode(),
     createVector: () => Object.assign(new MockNode("VECTOR"), { vectorPaths: [] }),
     createRectangle: () => new MockNode("RECTANGLE"),
@@ -110,6 +122,95 @@ beforeEach(() => {
 });
 
 describe("renderDocument hierarchy", () => {
+  it.each([
+    ["source-over", "NORMAL"],
+    ["multiply", "MULTIPLY"],
+    ["screen", "SCREEN"],
+    ["color", "COLOR"],
+    ["hard-light", "HARD_LIGHT"],
+    ["soft-light", "SOFT_LIGHT"],
+    ["color-burn", "COLOR_BURN"],
+    ["color-dodge", "COLOR_DODGE"],
+    ["luminosity", "LUMINOSITY"],
+  ])("maps Illustrator/PDF blend mode %s to Figma %s", (source, expected) => {
+    expect(mapBlendMode(source)).toBe(expected);
+  });
+
+  it("renders editable IR gradients as native Figma gradient paints", async () => {
+    const document: IRDocument = {
+      version: IR_VERSION,
+      source: { name: "gradient.ai", format: "ai", byteSize: 1 },
+      assets: [],
+      report: createReport("ai", "gradient.ai"),
+      pages: [
+        {
+          id: "page",
+          name: "Artboard",
+          type: "frame",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 200,
+          children: [
+            {
+              id: "gradient",
+              name: "BG_Color Gradient",
+              type: "rectangle",
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 200,
+              fills: [
+                {
+                  type: "gradient",
+                  gradientType: "linear",
+                  start: { x: 0.25, y: 1 },
+                  end: { x: 0.25, y: 0 },
+                  opacity: 0.4,
+                  stops: [
+                    {
+                      position: 0,
+                      color: { r: 0.1, g: 0.2, b: 0.3, a: 0.5 },
+                    },
+                    {
+                      position: 1,
+                      color: { r: 0.4, g: 0.5, b: 0.6, a: 1 },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    await renderDocument(document);
+    const page = figma.currentPage.children[0] as unknown as MockNode;
+    const gradient = page.children[0]!;
+
+    expect(gradient.fills).toEqual([
+      {
+        type: "GRADIENT_LINEAR",
+        opacity: 0.4,
+        gradientStops: [
+          {
+            position: 0,
+            color: { r: 0.1, g: 0.2, b: 0.3, a: 0.5 },
+          },
+          {
+            position: 1,
+            color: { r: 0.4, g: 0.5, b: 0.6, a: 1 },
+          },
+        ],
+        gradientTransform: [
+          [0, -1, 1],
+          [1, 0, 0.25],
+        ],
+      },
+    ]);
+  });
+
   it("creates real groups and removes temporary SVG frames", async () => {
     const document: IRDocument = {
       version: IR_VERSION,
@@ -156,6 +257,7 @@ describe("renderDocument hierarchy", () => {
                   height: 20,
                   characters: "Editable",
                   fontFamily: "Inter",
+                  runs: [{ start: 0, end: 8, lineHeight: 24 }],
                 },
               ],
             },
@@ -171,12 +273,17 @@ describe("renderDocument hierarchy", () => {
     expect(figma.currentPage.children).toHaveLength(1);
     expect(page.type).toBe("FRAME");
     expect(page.name).toBe("Artboard");
+    expect(page.fills).toEqual([]);
     expect(page.children).toHaveLength(1);
     expect(layer.type).toBe("GROUP");
     expect(layer.name).toBe("Layer_A");
+    expect(layer.blendMode).toBe("PASS_THROUGH");
     expect(layer.children.map((node) => [node.type, node.name])).toEqual([
       ["VECTOR", "Path"],
       ["TEXT", "Title"],
+    ]);
+    expect((layer.children[1] as MockTextNode).rangeLineHeights).toEqual([
+      [0, 8, { unit: "PIXELS", value: 24 }],
     ]);
     expect([
       page.name,
@@ -374,6 +481,50 @@ describe("font resolution", () => {
         suggested: { family: "Inter", style: "Regular" },
       },
     ]);
+  });
+
+  it("resolves installed style and localized family aliases without reporting them missing", async () => {
+    const analysis = await analyzeRequestedFonts(
+      [
+        { family: "BiaoXiaoZhiLongZhuTi-J", style: "Regular" },
+        { family: "SXSGYS", style: "Regular" },
+      ],
+      [
+        { family: "Inter", style: "Regular" },
+        { family: "标小智龙珠体 简", style: "Regular" },
+        { family: "SXSGYS", style: "SXSGYS" },
+      ],
+    );
+
+    expect(analysis.missingFonts).toEqual([]);
+    expect(analysis.resolvedReplacements).toEqual({
+      "biaoxiaozhilongzhuti-j::regular": {
+        family: "标小智龙珠体 简",
+        style: "Regular",
+      },
+      "sxsgys::regular": {
+        family: "SXSGYS",
+        style: "SXSGYS",
+      },
+    });
+  });
+
+  it("matches installed font families across separator differences", async () => {
+    const analysis = await analyzeRequestedFonts(
+      [{ family: "BiaoXiaoZhiLongZhuTi-J", style: "Regular" }],
+      [
+        { family: "Inter", style: "Regular" },
+        { family: "Biao Xiao Zhi Long Zhu Ti J", style: "Regular" },
+      ],
+    );
+
+    expect(analysis.missingFonts).toEqual([]);
+    expect(analysis.resolvedReplacements).toEqual({
+      "biaoxiaozhilongzhuti-j::regular": {
+        family: "Biao Xiao Zhi Long Zhu Ti J",
+        style: "Regular",
+      },
+    });
   });
 
   it("uses the explicit replacement and reports the source-to-target mapping", async () => {

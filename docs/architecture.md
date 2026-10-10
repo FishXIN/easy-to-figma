@@ -65,7 +65,7 @@ sequenceDiagram
   UI->>P: ArrayBuffer + options
   P-->>UI: IR document + report
   UI->>M: requested font list
-  M-->>UI: exact matches + missing-font replacements
+  M-->>UI: exact/alias matches + missing-font replacements
   UI->>M: import-document + replacement map
   M->>M: Load selected fonts and assets
   M->>C: Create native nodes
@@ -82,9 +82,9 @@ Embedded source images are represented as `Uint8Array` assets. The plugin bridge
 - Invalid container or XML: stop parsing and show a user-facing error.
 - Unsupported local object: rasterize or skip according to import settings.
 - Missing image relationship: skip the object and add a report warning.
-- Missing font: stop at the pre-import replacement panel until the user selects an available family/style.
+- Missing font: resolve installed style and verified PostScript/localized-family aliases first, then stop at the pre-import replacement panel only for genuinely unavailable pairs.
 - Unsupported Photoshop adjustment: preserve the source adjustment layer marker, apply every compatible native image filter, and report the non-equivalent fields.
-- Complex soft mask: preserve its rendered alpha in the smallest independent image layer while keeping blend mode and uniform opacity native.
+- Complex soft mask: keep the editable background separate and derive an independent transparent overlay from the PDF-composited result.
 - Renderer failure: remove every root node created by the current import, preserve the parser report, and surface the source-node path with the Figma API error.
 
 ## Security and Privacy

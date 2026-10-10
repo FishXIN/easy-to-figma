@@ -1082,19 +1082,21 @@ interface PdfOperatorList {
   lastChunk?: boolean;
 }
 
-interface PdfLayerRange {
+export interface PdfLayerRange {
   id: string;
   name: string;
   start: number;
   end: number;
+  visible?: boolean;
 }
 
-interface PdfImageSegment {
+export interface PdfImageSegment {
   start: number;
   end: number;
   blendMode: string;
   opacity: number;
   hasSoftMask: boolean;
+  opacityBaked: boolean;
 }
 
 interface PdfTextItem {
@@ -1112,10 +1114,10 @@ interface PdfTextStyle {
   blendMode?: string;
 }
 
-function pdfLayerRanges(
+export function pdfLayerRanges(
   operatorList: PdfOperatorList,
   optionalContentConfig: {
-    getGroup: (id: string) => { name?: string } | undefined;
+    getGroup: (id: string) => { name?: string; visible?: boolean } | undefined;
   },
   ops: Record<string, number>,
 ): PdfLayerRange[] {
@@ -1137,14 +1139,57 @@ function pdfLayerRanges(
     if (operator !== ops.endMarkedContent) continue;
     const marked = stack.pop();
     if (!marked?.id) continue;
+    const group = optionalContentConfig.getGroup(marked.id);
     ranges.push({
       id: marked.id,
-      name: optionalContentConfig.getGroup(marked.id)?.name ?? marked.id,
+      name: group?.name ?? marked.id,
       start: marked.start,
       end: index,
+      visible: group?.visible ?? true,
     });
   }
-  return ranges.sort((left, right) => left.start - right.start);
+  const sortedRanges = ranges.sort((left, right) => left.start - right.start);
+  return sortedRanges.filter((range) => {
+    if (!range.visible || range.start !== range.end) return true;
+    const normalizedName = range.name.trim().toLowerCase();
+    return !sortedRanges.some(
+      (candidate) =>
+        candidate !== range &&
+        candidate.name.trim().toLowerCase() === normalizedName &&
+        candidate.visible === false,
+    );
+  });
+}
+
+export function pdfLayerNode(
+  range: PdfLayerRange,
+  width: number,
+  height: number,
+  children: IRNode[],
+): ContainerNode {
+  const normalizedName = range.name.toLowerCase().replace(/[\s_-]+/g, "");
+  const locked = new Set([
+    "bgcolor",
+    "bgmask",
+    "effect",
+    "picture",
+    "subbg",
+    "subbgp2",
+  ]).has(normalizedName);
+  return {
+    id: createId("ai-layer"),
+    name: range.name,
+    type: children.length === 0 ? "frame" : "group",
+    x: 0,
+    y: 0,
+    width,
+    height,
+    visible: range.visible,
+    locked,
+    childCoordinateSpace: "page",
+    clipsContent: false,
+    children,
+  };
 }
 
 function pdfBlendMode(value: unknown): string {
@@ -1167,6 +1212,7 @@ export interface PdfImageSegmentStyle {
   blendMode: string;
   opacity: number;
   hasSoftMask: boolean;
+  opacityBaked: boolean;
 }
 
 function pdfGroupOptions(args: unknown): {
@@ -1176,9 +1222,31 @@ function pdfGroupOptions(args: unknown): {
   return args[0] as { hasSoftMask?: boolean };
 }
 
-export function extractPdfImageSegmentStyle(
+function applyPdfImageGState(
+  state: PdfImageSegmentStyle,
+  args: unknown,
+  opacityBaked: boolean,
+): PdfImageSegmentStyle {
+  let next = state;
+  for (const [name, value] of pdfGStateEntries(args)) {
+    if (name === "BM") next = { ...next, blendMode: pdfBlendMode(value) };
+    if (name === "ca") {
+      const opacity = Number(value);
+      if (Number.isFinite(opacity)) {
+        next = {
+          ...next,
+          opacity: Math.max(0, Math.min(1, opacity)),
+          opacityBaked,
+        };
+      }
+    }
+    if (name === "SMask") next = { ...next, hasSoftMask: Boolean(value) };
+  }
+  return next;
+}
+
+function pdfImageStateBefore(
   operatorList: PdfOperatorList,
-  start: number,
   end: number,
   ops: Record<string, number>,
 ): PdfImageSegmentStyle {
@@ -1186,10 +1254,40 @@ export function extractPdfImageSegmentStyle(
     blendMode: "normal",
     opacity: 1,
     hasSoftMask: false,
+    opacityBaked: false,
   };
+  const stack: PdfImageSegmentStyle[] = [];
+  for (let index = 0; index < end; index += 1) {
+    const operator = operatorList.fnArray[index];
+    if (operator === ops.save || operator === ops.beginGroup) {
+      stack.push({ ...state });
+      if (operator === ops.beginGroup && pdfGroupOptions(operatorList.argsArray[index]).hasSoftMask) {
+        state = { ...state, hasSoftMask: true };
+      }
+      continue;
+    }
+    if (operator === ops.restore || operator === ops.endGroup) {
+      state = stack.pop() ?? state;
+      continue;
+    }
+    if (operator === ops.setGState) {
+      state = applyPdfImageGState(state, operatorList.argsArray[index], false);
+    }
+  }
+  return { ...state, opacityBaked: false };
+}
+
+export function extractPdfImageSegmentStyle(
+  operatorList: PdfOperatorList,
+  start: number,
+  end: number,
+  ops: Record<string, number>,
+): PdfImageSegmentStyle {
+  let state = pdfImageStateBefore(operatorList, start, ops);
+  const inheritedStyle = { ...state };
   let imageStyle: PdfImageSegmentStyle | undefined;
   let groupOutputStyle: PdfImageSegmentStyle | undefined;
-  let encounteredSoftMask = false;
+  let encounteredSoftMask = state.hasSoftMask;
   const stack: PdfImageSegmentStyle[] = [];
   const imageOperators = new Set([
     ops.paintImageXObject,
@@ -1212,30 +1310,84 @@ export function extractPdfImageSegmentStyle(
       continue;
     }
     if (operator === ops.setGState) {
-      for (const [name, value] of pdfGStateEntries(operatorList.argsArray[index])) {
-        if (name === "BM") state = { ...state, blendMode: pdfBlendMode(value) };
-        if (name === "ca") {
-          const opacity = Number(value);
-          if (Number.isFinite(opacity)) {
-            state = { ...state, opacity: Math.max(0, Math.min(1, opacity)) };
-          }
-        }
-        if (name === "SMask") {
-          if (value) encounteredSoftMask = true;
-          state = { ...state, hasSoftMask: Boolean(value) };
-        }
-      }
+      state = applyPdfImageGState(state, operatorList.argsArray[index], true);
+      if (state.hasSoftMask) encounteredSoftMask = true;
     }
     if (imageOperators.has(operator)) imageStyle = { ...state };
   }
-  const style = groupOutputStyle ?? imageStyle ?? state;
+  const hasInheritedCompositing =
+    inheritedStyle.blendMode !== "normal" ||
+    inheritedStyle.opacity !== 1 ||
+    inheritedStyle.hasSoftMask;
+  const style =
+    groupOutputStyle ??
+    (hasInheritedCompositing
+      ? {
+          ...(imageStyle ?? state),
+          blendMode: inheritedStyle.blendMode,
+          opacity: inheritedStyle.opacity,
+          hasSoftMask:
+            inheritedStyle.hasSoftMask ||
+            (imageStyle ?? state).hasSoftMask,
+          opacityBaked: false,
+        }
+      : imageStyle ?? state);
   return {
     ...style,
     hasSoftMask: encounteredSoftMask || style.hasSoftMask,
   };
 }
 
-function pdfImageSegments(
+function pdfSoftMaskGroupRanges(
+  operatorList: PdfOperatorList,
+  range: PdfLayerRange,
+  ops: Record<string, number>,
+): Array<{ start: number; end: number }> {
+  const imageOperators = new Set([
+    ops.paintImageXObject,
+    ops.paintInlineImageXObject,
+    ops.paintImageMaskXObject,
+  ]);
+  const groups: Array<{
+    start: number;
+    hasSoftMask: boolean;
+    nestedInSoftMask: boolean;
+    hasImage: boolean;
+  }> = [];
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  for (let index = range.start; index < range.end; index += 1) {
+    const operator = operatorList.fnArray[index];
+    if (operator === ops.beginGroup) {
+      const hasSoftMask = Boolean(
+        pdfGroupOptions(operatorList.argsArray[index]).hasSoftMask,
+      );
+      groups.push({
+        start: index,
+        hasSoftMask,
+        nestedInSoftMask: groups.some((group) => group.hasSoftMask),
+        hasImage: false,
+      });
+      continue;
+    }
+    if (imageOperators.has(operator)) {
+      for (const group of groups) group.hasImage = true;
+      continue;
+    }
+    if (operator !== ops.endGroup) continue;
+    const group = groups.pop();
+    if (
+      group?.hasSoftMask &&
+      group.hasImage &&
+      !group.nestedInSoftMask
+    ) {
+      ranges.push({ start: group.start, end: index });
+    }
+  }
+  return ranges;
+}
+
+export function pdfImageSegments(
   operatorList: PdfOperatorList,
   range: PdfLayerRange,
   ops: Record<string, number>,
@@ -1245,52 +1397,68 @@ function pdfImageSegments(
     ops.paintInlineImageXObject,
     ops.paintImageMaskXObject,
   ]);
-  const segments: PdfImageSegment[] = [];
-  let depth = 0;
-  let start = -1;
-  let directImageStart = -1;
+  const softMaskRanges = pdfSoftMaskGroupRanges(operatorList, range, ops);
+  const isSoftMaskOperation = (index: number) =>
+    softMaskRanges.some(
+      (softMaskRange) =>
+        index >= softMaskRange.start && index <= softMaskRange.end,
+    );
+  const overlapsSoftMask = (start: number, end: number) =>
+    softMaskRanges.some(
+      (softMaskRange) =>
+        start <= softMaskRange.end && end >= softMaskRange.start,
+    );
+  const saveStack: number[] = [];
+  const saveRanges: Array<{ start: number; end: number }> = [];
 
   for (let index = range.start; index < range.end; index += 1) {
     const operator = operatorList.fnArray[index];
     if (operator === ops.save) {
-      if (depth === 0) start = index;
-      depth += 1;
+      saveStack.push(index);
+      continue;
     }
-    if (depth === 0 && imageOperators.has(operator)) directImageStart = index;
     if (operator !== ops.restore) continue;
+    const start = saveStack.pop();
+    if (start !== undefined) saveRanges.push({ start, end: index });
+  }
 
-    depth -= 1;
-    if (depth !== 0 || start < 0) continue;
-    const hasImage = operatorList.fnArray
-      .slice(start, index + 1)
-      .some((candidate) => imageOperators.has(candidate));
-    if (hasImage) {
-      const style = extractPdfImageSegmentStyle(operatorList, start, index, ops);
-      segments.push({
-        start,
-        end: index,
-        ...style,
-      });
+  const ranges = [...softMaskRanges];
+  for (let index = range.start; index < range.end; index += 1) {
+    if (
+      !imageOperators.has(operatorList.fnArray[index]) ||
+      isSoftMaskOperation(index)
+    ) {
+      continue;
     }
-    start = -1;
+    const enclosingSave = saveRanges
+      .filter(
+        (saveRange) =>
+          saveRange.start <= index &&
+          saveRange.end >= index &&
+          !overlapsSoftMask(saveRange.start, saveRange.end),
+      )
+      .sort((left, right) => right.start - left.start)[0];
+    ranges.push(enclosingSave ?? { start: index, end: index });
   }
 
-  if (directImageStart >= 0 && !segments.some((segment) =>
-    directImageStart >= segment.start && directImageStart <= segment.end
-  )) {
-    const style = extractPdfImageSegmentStyle(
-      operatorList,
-      range.start,
-      directImageStart,
-      ops,
-    );
-    segments.push({
-      start: directImageStart,
-      end: directImageStart,
-      ...style,
-    });
-  }
-  return segments;
+  return Array.from(
+    new Map(
+      ranges.map((segmentRange) => [
+        `${segmentRange.start}:${segmentRange.end}`,
+        segmentRange,
+      ]),
+    ).values(),
+  )
+    .sort((left, right) => left.start - right.start)
+    .map((segmentRange) => ({
+      ...segmentRange,
+      ...extractPdfImageSegmentStyle(
+        operatorList,
+        segmentRange.start,
+        segmentRange.end,
+        ops,
+      ),
+    }));
 }
 
 export function restoreUniformOpacity(
@@ -1304,6 +1472,46 @@ export function restoreUniformOpacity(
   return pixels;
 }
 
+export function pdfImageOpacityStrategy(
+  style: Pick<PdfImageSegmentStyle, "opacity" | "hasSoftMask" | "opacityBaked">,
+): { normalizeAlpha: boolean; nodeOpacity: number } {
+  if (style.hasSoftMask) {
+    return {
+      normalizeAlpha: false,
+      nodeOpacity: style.opacityBaked ? 1 : style.opacity,
+    };
+  }
+  return {
+    normalizeAlpha: style.opacityBaked && style.opacity > 0 && style.opacity < 1,
+    nodeOpacity: style.opacity,
+  };
+}
+
+export interface PdfImageCompositingPlacement {
+  imageBlendMode: string;
+  imageOpacity: number;
+  groupBlendMode?: string;
+  groupOpacity?: number;
+}
+
+export function pdfImageCompositingPlacement(
+  style: PdfImageSegmentStyle,
+): PdfImageCompositingPlacement {
+  const opacityStrategy = pdfImageOpacityStrategy(style);
+  if (!style.hasSoftMask) {
+    return {
+      imageBlendMode: style.blendMode,
+      imageOpacity: opacityStrategy.nodeOpacity,
+    };
+  }
+  return {
+    imageBlendMode: "normal",
+    imageOpacity: opacityStrategy.nodeOpacity,
+    groupBlendMode: style.blendMode,
+    groupOpacity: 1,
+  };
+}
+
 function restoreCanvasOpacity(canvas: HTMLCanvasElement, opacity: number): void {
   if (opacity <= 0 || opacity >= 1) return;
   const context = canvas.getContext("2d");
@@ -1311,6 +1519,123 @@ function restoreCanvasOpacity(canvas: HTMLCanvasElement, opacity: number): void 
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   restoreUniformOpacity(image.data, opacity);
   context.putImageData(image, 0, 0);
+}
+
+export function normalOverlayFromCompositedPixels(
+  backdrop: Uint8ClampedArray,
+  composited: Uint8ClampedArray,
+  source: Uint8ClampedArray,
+  opacity: number,
+): Uint8ClampedArray {
+  const overlay = new Uint8ClampedArray(source.length);
+  const normalizedOpacity = Math.max(0, Math.min(1, opacity));
+  for (let index = 0; index < source.length; index += 4) {
+    const alpha = ((source[index + 3] ?? 0) / 255) * normalizedOpacity;
+    if (alpha <= 1 / 255) continue;
+    overlay[index + 3] = Math.round(alpha * 255);
+    for (let channel = 0; channel < 3; channel += 1) {
+      const before = (backdrop[index + channel] ?? 0) / 255;
+      const after = (composited[index + channel] ?? 0) / 255;
+      overlay[index + channel] = Math.round(
+        Math.max(0, Math.min(1, (after - before * (1 - alpha)) / alpha)) * 255,
+      );
+    }
+  }
+  return overlay;
+}
+
+export function transparentOverlayFromCompositedPixels(
+  backdrop: Uint8ClampedArray,
+  composited: Uint8ClampedArray,
+): Uint8ClampedArray {
+  const overlay = new Uint8ClampedArray(composited.length);
+  for (let index = 0; index < composited.length; index += 4) {
+    let alpha = 0;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const before = (backdrop[index + channel] ?? 0) / 255;
+      const after = (composited[index + channel] ?? 0) / 255;
+      if (after > before) {
+        alpha = Math.max(
+          alpha,
+          before >= 1 ? 1 : (after - before) / (1 - before),
+        );
+      } else if (after < before) {
+        alpha = Math.max(
+          alpha,
+          before <= 0 ? 1 : (before - after) / before,
+        );
+      }
+    }
+    if (alpha <= 1 / 255) continue;
+    const quantizedAlpha = Math.min(1, Math.ceil(alpha * 255) / 255);
+    overlay[index + 3] = Math.round(quantizedAlpha * 255);
+    for (let channel = 0; channel < 3; channel += 1) {
+      const before = (backdrop[index + channel] ?? 0) / 255;
+      const after = (composited[index + channel] ?? 0) / 255;
+      overlay[index + channel] = Math.round(
+        Math.max(
+          0,
+          Math.min(
+            1,
+            (after - before * (1 - quantizedAlpha)) / quantizedAlpha,
+          ),
+        ) * 255,
+      );
+    }
+  }
+  return overlay;
+}
+
+function normalizeCanvasBlendToOverlay(
+  canvas: HTMLCanvasElement,
+  backdropCanvas: HTMLCanvasElement,
+  blendMode: string,
+  opacity: number,
+): boolean {
+  if (
+    canvas.width !== backdropCanvas.width ||
+    canvas.height !== backdropCanvas.height ||
+    blendMode === "normal"
+  ) {
+    return false;
+  }
+  const sourceContext = canvas.getContext("2d");
+  const backdropContext = backdropCanvas.getContext("2d");
+  if (!sourceContext || !backdropContext) return false;
+  const source = sourceContext.getImageData(0, 0, canvas.width, canvas.height);
+  const backdrop = backdropContext.getImageData(
+    0,
+    0,
+    backdropCanvas.width,
+    backdropCanvas.height,
+  );
+  const previousComposite = backdropContext.globalCompositeOperation;
+  const previousAlpha = backdropContext.globalAlpha;
+  try {
+    backdropContext.globalCompositeOperation = blendMode as GlobalCompositeOperation;
+    if (backdropContext.globalCompositeOperation !== blendMode) return false;
+    backdropContext.globalAlpha = opacity;
+    backdropContext.drawImage(canvas, 0, 0);
+  } finally {
+    backdropContext.globalCompositeOperation = previousComposite;
+    backdropContext.globalAlpha = previousAlpha;
+  }
+  const composited = backdropContext.getImageData(
+    0,
+    0,
+    backdropCanvas.width,
+    backdropCanvas.height,
+  );
+  source.data.set(
+    normalOverlayFromCompositedPixels(
+      backdrop.data,
+      composited.data,
+      source.data,
+      opacity,
+    ),
+  );
+  sourceContext.putImageData(source, 0, 0);
+  return true;
 }
 
 function canvasHasVisiblePixels(canvas: HTMLCanvasElement): boolean {
@@ -1333,6 +1658,77 @@ function pdfImageLayerName(index: number, blendMode: string): string {
   return `${String(index + 1).padStart(2, "0")} ${label}`;
 }
 
+async function renderPdfRangeCanvas(
+  pdfPage: {
+    getViewport: (options: { scale: number }) => { width: number; height: number };
+    render: (options: {
+      canvas: HTMLCanvasElement;
+      canvasContext: CanvasRenderingContext2D;
+      viewport: unknown;
+      background: string;
+      operationsFilter: (index: number) => boolean;
+      optionalContentConfigPromise?: Promise<unknown>;
+    }) => { promise: Promise<void> };
+  },
+  ranges: Array<Pick<PdfLayerRange, "start" | "end">>,
+  optionalContentConfigPromise?: Promise<unknown>,
+): Promise<HTMLCanvasElement | undefined> {
+  const viewport = pdfPage.getViewport({ scale: 1 });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const context = canvas.getContext("2d");
+  if (!context) return undefined;
+  await pdfPage.render({
+    canvas,
+    canvasContext: context,
+    viewport,
+    background: "rgba(0,0,0,0)",
+    operationsFilter: (index) =>
+      ranges.some((range) => index >= range.start && index <= range.end),
+    optionalContentConfigPromise,
+  }).promise;
+  if (!canvasHasVisiblePixels(canvas)) {
+    canvas.width = 1;
+    canvas.height = 1;
+    return undefined;
+  }
+  return canvas;
+}
+
+function transparentOverlayCanvas(
+  backdropCanvas: HTMLCanvasElement,
+  compositedCanvas: HTMLCanvasElement,
+): HTMLCanvasElement | undefined {
+  if (
+    backdropCanvas.width !== compositedCanvas.width ||
+    backdropCanvas.height !== compositedCanvas.height
+  ) {
+    return undefined;
+  }
+  const backdropContext = backdropCanvas.getContext("2d");
+  const compositedContext = compositedCanvas.getContext("2d");
+  if (!backdropContext || !compositedContext) return undefined;
+  const backdrop = backdropContext.getImageData(
+    0,
+    0,
+    backdropCanvas.width,
+    backdropCanvas.height,
+  );
+  const composited = compositedContext.getImageData(
+    0,
+    0,
+    compositedCanvas.width,
+    compositedCanvas.height,
+  );
+  composited.data.set(
+    transparentOverlayFromCompositedPixels(backdrop.data, composited.data),
+  );
+  compositedContext.putImageData(composited, 0, 0);
+  if (!canvasHasVisiblePixels(compositedCanvas)) return undefined;
+  return compositedCanvas;
+}
+
 async function renderPdfImageLayers(
   pdfPage: {
     getViewport: (options: { scale: number }) => { width: number; height: number };
@@ -1342,6 +1738,7 @@ async function renderPdfImageLayers(
       viewport: unknown;
       background: string;
       operationsFilter: (index: number) => boolean;
+      optionalContentConfigPromise?: Promise<unknown>;
     }) => { promise: Promise<void> };
   },
   operatorList: PdfOperatorList,
@@ -1349,10 +1746,50 @@ async function renderPdfImageLayers(
   ops: Record<string, number>,
   assets: Asset[],
   context: SvgContext,
+  optionalContentConfigPromise?: Promise<unknown>,
+  compositingBackdrop?: HTMLCanvasElement,
+  compositedOverlay?: HTMLCanvasElement,
 ): Promise<IRNode[]> {
   const viewport = pdfPage.getViewport({ scale: 1 });
   const nodes: IRNode[] = [];
+  if (compositedOverlay) {
+    const assetId = createId("asset");
+    const layerName = "01 氛围叠影";
+    assets.push({
+      id: assetId,
+      name: `${range.name} ${layerName}.png`,
+      mimeType: "image/png",
+      data: await canvasToPngBytes(compositedOverlay),
+      width: compositedOverlay.width,
+      height: compositedOverlay.height,
+    });
+    nodes.push({
+      id: createId("image"),
+      name: layerName,
+      type: "image",
+      x: 0,
+      y: 0,
+      width: viewport.width,
+      height: viewport.height,
+      opacity: 1,
+      blendMode: "normal",
+      assetRef: assetId,
+      scaleMode: "fill",
+    });
+    context.report.items.push({
+      level: "fallback",
+      code: "PDF_SOFT_MASK_EFFECT_PRESERVED",
+      message:
+        "The source soft-mask layer remains separate from its editable background gradient and was normalized to one transparent overlay.",
+      nodeName: layerName,
+      pageName: range.name,
+    });
+    context.report.editableNodes += 1;
+    return nodes;
+  }
   for (const segment of pdfImageSegments(operatorList, range, ops)) {
+    const opacityStrategy = pdfImageOpacityStrategy(segment);
+    let placement = pdfImageCompositingPlacement(segment);
     const canvas = document.createElement("canvas");
     canvas.width = Math.ceil(viewport.width);
     canvas.height = Math.ceil(viewport.height);
@@ -1365,8 +1802,25 @@ async function renderPdfImageLayers(
       viewport,
       background: "rgba(0,0,0,0)",
       operationsFilter: (index) => index >= segment.start && index <= segment.end,
+      optionalContentConfigPromise,
     }).promise;
-    restoreCanvasOpacity(canvas, segment.opacity);
+    if (opacityStrategy.normalizeAlpha) restoreCanvasOpacity(canvas, segment.opacity);
+    const normalizedBlend =
+      compositingBackdrop !== undefined &&
+      normalizeCanvasBlendToOverlay(
+        canvas,
+        compositingBackdrop,
+        segment.blendMode,
+        opacityStrategy.nodeOpacity,
+      );
+    if (normalizedBlend) {
+      placement = {
+        imageBlendMode: "normal",
+        imageOpacity: 1,
+        groupBlendMode: "normal",
+        groupOpacity: 1,
+      };
+    }
     if (!canvasHasVisiblePixels(canvas)) {
       canvas.width = 1;
       canvas.height = 1;
@@ -1374,34 +1828,54 @@ async function renderPdfImageLayers(
     }
 
     const assetId = createId("asset");
+    const layerName = pdfImageLayerName(nodes.length, segment.blendMode);
     assets.push({
       id: assetId,
-      name: `${range.name} ${pdfImageLayerName(nodes.length, segment.blendMode)}.png`,
+      name: `${range.name} ${layerName}.png`,
       mimeType: "image/png",
       data: await canvasToPngBytes(canvas),
       width: canvas.width,
       height: canvas.height,
     });
-    nodes.push({
+    const imageNode: IRNode = {
       id: createId("image"),
-      name: pdfImageLayerName(nodes.length, segment.blendMode),
+      name: segment.hasSoftMask ? "蒙版内容" : layerName,
       type: "image",
       x: 0,
       y: 0,
       width: viewport.width,
       height: viewport.height,
-      opacity: segment.opacity,
-      blendMode: segment.blendMode,
+      opacity: placement.imageOpacity,
+      blendMode: placement.imageBlendMode,
       assetRef: assetId,
       scaleMode: "fill",
-    });
+    };
+    nodes.push(
+      placement.groupBlendMode
+        ? {
+            id: createId("soft-mask-group"),
+            name: layerName,
+            type: "group",
+            x: 0,
+            y: 0,
+            width: viewport.width,
+            height: viewport.height,
+            opacity: placement.groupOpacity,
+            blendMode: placement.groupBlendMode,
+            childCoordinateSpace: "page",
+            children: [imageNode],
+          }
+        : imageNode,
+    );
     if (segment.hasSoftMask) {
       context.report.items.push({
         level: "fallback",
         code: "PDF_SOFT_MASK_EFFECT_PRESERVED",
         message:
-          "The source soft mask or blur was preserved inside this independent image layer; its blend mode and opacity remain native Figma properties.",
-        nodeName: pdfImageLayerName(nodes.length - 1, segment.blendMode),
+          normalizedBlend
+            ? "The source soft mask remains an independent editable layer; its PDF blend result was normalized to a transparent overlay because Figma composites this group differently."
+            : "The source soft mask and blur were preserved in an independent image leaf; its opacity and blend mode remain native properties on the matching Figma group.",
+        nodeName: layerName,
         pageName: range.name,
       });
     } else if (segment.blendMode !== "normal" || segment.opacity < 1) {
@@ -1410,11 +1884,11 @@ async function renderPdfImageLayers(
         code: "PDF_IMAGE_COMPOSITING_PRESERVED",
         message:
           "The source image blend mode and opacity were restored as native Figma layer properties.",
-        nodeName: pdfImageLayerName(nodes.length - 1, segment.blendMode),
+        nodeName: layerName,
         pageName: range.name,
       });
     }
-    context.report.editableNodes += 1;
+    context.report.editableNodes += segment.hasSoftMask ? 2 : 1;
     canvas.width = 1;
     canvas.height = 1;
   }
@@ -1519,20 +1993,75 @@ function pdfFontFamily(
   }
 }
 
-function shouldMergePdfText(previous: PdfTextItem, next: PdfTextItem): boolean {
+function pdfTextItemEdges(item: PdfTextItem): {
+  left: number;
+  center: number;
+  right: number;
+} {
+  const left = item.transform[4] ?? 0;
+  const right = left + item.width;
+  return { left, center: (left + right) / 2, right };
+}
+
+export function shouldMergePdfText(previous: PdfTextItem, next: PdfTextItem): boolean {
   const previousX = previous.transform[4] ?? 0;
   const previousY = previous.transform[5] ?? 0;
   const nextX = next.transform[4] ?? 0;
   const nextY = next.transform[5] ?? 0;
-  const sameColumn = Math.abs(previousX - nextX) <= 6;
+  const previousEdges = pdfTextItemEdges(previous);
+  const nextEdges = pdfTextItemEdges(next);
+  const alignmentTolerance = Math.max(previous.height, next.height) * 0.35 + 2;
+  const sameParagraphAlignment =
+    Math.abs(previousEdges.left - nextEdges.left) <= alignmentTolerance ||
+    Math.abs(previousEdges.center - nextEdges.center) <= alignmentTolerance ||
+    Math.abs(previousEdges.right - nextEdges.right) <= alignmentTolerance;
   const lineGap = Math.abs(previousY - nextY);
   const closeLine = lineGap <= Math.max(previous.height, next.height) * 2.25;
   const sameBaseline = lineGap <= 2;
   const adjacent = nextX <= previousX + previous.width + Math.max(previous.height, next.height);
-  return Boolean((previous.hasEOL && sameColumn && closeLine) || (sameBaseline && adjacent));
+  return Boolean(
+    (previous.hasEOL && sameParagraphAlignment && closeLine) ||
+      (sameBaseline && adjacent),
+  );
 }
 
-function pdfTextNodes(
+export function pdfTextAlignment(
+  items: PdfTextItem[],
+): "left" | "center" | "right" {
+  const lines: Array<{ y: number; left: number; right: number; height: number }> = [];
+  for (const item of items) {
+    const edges = pdfTextItemEdges(item);
+    const line = lines.find((candidate) => Math.abs(candidate.y - (item.transform[5] ?? 0)) <= 2);
+    if (line) {
+      line.left = Math.min(line.left, edges.left);
+      line.right = Math.max(line.right, edges.right);
+      line.height = Math.max(line.height, item.height);
+    } else {
+      lines.push({
+        y: item.transform[5] ?? 0,
+        left: edges.left,
+        right: edges.right,
+        height: item.height,
+      });
+    }
+  }
+  if (lines.length < 2) return "left";
+  const spreads = {
+    left: Math.max(...lines.map((line) => line.left)) - Math.min(...lines.map((line) => line.left)),
+    center:
+      Math.max(...lines.map((line) => (line.left + line.right) / 2)) -
+      Math.min(...lines.map((line) => (line.left + line.right) / 2)),
+    right:
+      Math.max(...lines.map((line) => line.right)) - Math.min(...lines.map((line) => line.right)),
+  };
+  const tolerance = Math.max(6, Math.max(...lines.map((line) => line.height)) * 0.35);
+  const alignment = (Object.entries(spreads) as Array<
+    ["left" | "center" | "right", number]
+  >).sort((left, right) => left[1] - right[1])[0];
+  return alignment && alignment[1] <= tolerance ? alignment[0] : "left";
+}
+
+export function pdfTextNodes(
   pdfPage: {
     view: number[];
     commonObjs: { get: (id: string) => { name?: string } };
@@ -1559,6 +2088,24 @@ function pdfTextNodes(
   return clusters.map((cluster) => {
     let characters = "";
     const runs: TextStyleRun[] = [];
+    const baselines: number[] = [];
+    const lineIndexes = new Map<PdfTextItem, number>();
+    for (const { item } of cluster) {
+      const baseline = item.transform[5] ?? 0;
+      const lineIndex = baselines.findIndex((value) => Math.abs(value - baseline) <= 2);
+      if (lineIndex >= 0) {
+        lineIndexes.set(item, lineIndex);
+      } else {
+        lineIndexes.set(item, baselines.length);
+        baselines.push(baseline);
+      }
+    }
+    const lineHeights = baselines.map((baseline, index) => {
+      const adjacentBaseline = baselines[index + 1] ?? baselines[index - 1];
+      return adjacentBaseline === undefined
+        ? undefined
+        : Math.abs(baseline - adjacentBaseline);
+    });
     const boxes = cluster.map(({ item }) => {
       const x = item.transform[4] ?? 0;
       const y = pageHeight - (item.transform[5] ?? 0) - item.height;
@@ -1568,16 +2115,23 @@ function pdfTextNodes(
     for (const { item, style } of cluster) {
       if (previous && Math.abs((previous.transform[5] ?? 0) - (item.transform[5] ?? 0)) > 2) {
         characters += "\n";
+        const previousRun = runs[runs.length - 1];
+        if (previousRun) previousRun.end = characters.length;
       }
       const start = characters.length;
       characters += item.str;
       const fontFamily = pdfFontFamily(pdfPage, item.fontName);
+      const lineHeight = lineHeights[lineIndexes.get(item) ?? 0];
       runs.push({
         start,
         end: characters.length,
         fontFamily,
         fontStyle: /bold/i.test(fontFamily) ? "Bold" : "Regular",
         fontSize: item.height,
+        lineHeight:
+          lineHeight === undefined
+            ? item.height * 1.2
+            : Math.max(item.height, lineHeight),
         fills: [{ type: "solid", color: style.fill }],
       });
       previous = item;
@@ -1604,8 +2158,8 @@ function pdfTextNodes(
       fontFamily: firstFont,
       fontStyle: /bold/i.test(firstFont) ? "Bold" : "Regular",
       fontSize: first.item.height,
-      lineHeight: first.item.height * 1.2,
-      textAlignHorizontal: "left",
+      lineHeight: "auto",
+      textAlignHorizontal: pdfTextAlignment(cluster.map(({ item }) => item)),
       textAlignVertical: "top",
       fills: [{ type: "solid", color: first.style.fill }],
       runs,
@@ -1800,6 +2354,133 @@ export function normalizePdfSvgMarkup(markup: string): string {
     .replace(/\sxmlns:svg="[^"]*"/g, "");
   if (/<svg\b[^>]*\sxmlns="[^"]*"/i.test(normalized)) return normalized;
   return normalized.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ');
+}
+
+export function extractPdfGradientFill(
+  operatorList: PdfOperatorList,
+  range: Pick<PdfLayerRange, "start" | "end">,
+  ops: Record<string, number>,
+  getPattern: (id: string) => unknown,
+  width: number,
+  height: number,
+): Paint | undefined {
+  const otherPaintOperators = new Set([
+    ops.stroke,
+    ops.closeStroke,
+    ops.fill,
+    ops.eoFill,
+    ops.fillStroke,
+    ops.eoFillStroke,
+    ops.closeFillStroke,
+    ops.closeEOFillStroke,
+  ]);
+  let matrix: Matrix = [...IDENTITY_MATRIX];
+  const matrixStack: Matrix[] = [];
+  let gradient: Paint | undefined;
+  let shadingCount = 0;
+
+  for (let index = range.start; index < range.end; index += 1) {
+    const operator = operatorList.fnArray[index];
+    const args = operatorList.argsArray[index];
+    if (otherPaintOperators.has(operator)) return undefined;
+    if (operator === ops.save) {
+      matrixStack.push([...matrix]);
+      continue;
+    }
+    if (operator === ops.restore) {
+      matrix = matrixStack.pop() ?? [...IDENTITY_MATRIX];
+      continue;
+    }
+    if (operator === ops.transform) {
+      const values = numericArray(args);
+      if (values && values.length >= 6) {
+        matrix = multiplyMatrix(matrix, values.slice(0, 6) as Matrix);
+      }
+      continue;
+    }
+    if (operator !== ops.shadingFill) continue;
+    shadingCount += 1;
+    const values = Array.isArray(args) ? args : [];
+    const patternId = values[0];
+    const pattern =
+      typeof patternId === "string" ? getPattern(patternId) : patternId;
+    if (
+      !Array.isArray(pattern) ||
+      pattern[0] !== "RadialAxial" ||
+      pattern[1] !== "axial"
+    ) {
+      return undefined;
+    }
+    const rawStops = Array.isArray(pattern[3]) ? pattern[3] : [];
+    const start = numericArray(pattern[4]) ?? [0, 0];
+    const end = numericArray(pattern[5]) ?? [1, 0];
+    const startPoint = transformPoint(matrix, start[0] ?? 0, start[1] ?? 0);
+    const endPoint = transformPoint(matrix, end[0] ?? 1, end[1] ?? 0);
+    gradient = {
+      type: "gradient",
+      gradientType: "linear",
+      stops: rawStops.flatMap((rawStop) => {
+        if (!Array.isArray(rawStop)) return [];
+        const color = parseColor(String(rawStop[1] ?? "#000000"));
+        if (!color) return [];
+        return [{
+          position: Math.max(0, Math.min(1, Number(rawStop[0]) || 0)),
+          color,
+        }];
+      }),
+      start: {
+        x: startPoint.x / Math.max(width, 1),
+        y: 1 - startPoint.y / Math.max(height, 1),
+      },
+      end: {
+        x: endPoint.x / Math.max(width, 1),
+        y: 1 - endPoint.y / Math.max(height, 1),
+      },
+    };
+  }
+
+  return shadingCount === 1 ? gradient : undefined;
+}
+
+export function gradientPaintsWithFallback(fill: Paint): Paint[] {
+  if (fill.type !== "gradient" || !fill.stops[0]) return [fill];
+  return [
+    fill,
+    {
+      type: "solid",
+      color: fill.stops[0].color,
+      opacity: fill.opacity,
+    },
+  ];
+}
+
+function pdfGradientNode(
+  pdfPage: { objs: PdfObjectPool },
+  operatorList: PdfOperatorList,
+  range: PdfLayerRange,
+  ops: Record<string, number>,
+  width: number,
+  height: number,
+): IRNode | undefined {
+  const fill = extractPdfGradientFill(
+    operatorList,
+    range,
+    ops,
+    (id) => pdfPage.objs.get(id),
+    width,
+    height,
+  );
+  if (!fill) return undefined;
+  return {
+    id: createId("gradient"),
+    name: `${range.name} Gradient`,
+    type: "rectangle",
+    x: 0,
+    y: 0,
+    width,
+    height,
+    fills: gradientPaintsWithFallback(fill),
+  };
 }
 
 async function pdfVectorNode(
@@ -2009,6 +2690,13 @@ async function parsePdfHierarchy(
     try {
       const pdf = await modernLoading.promise;
       const optionalContentConfig = await pdf.getOptionalContentConfig();
+      const extractionOptionalContentConfig = await pdf.getOptionalContentConfig();
+      for (const [id] of extractionOptionalContentConfig) {
+        extractionOptionalContentConfig.setVisibility(id, true, false);
+      }
+      const extractionOptionalContentConfigPromise = Promise.resolve(
+        extractionOptionalContentConfig,
+      );
       const order = optionalContentConfig.getOrder();
       hasLayerHierarchy = Array.isArray(order) && order.length > 0;
       if (!hasLayerHierarchy) return undefined;
@@ -2043,32 +2731,84 @@ async function parsePdfHierarchy(
           report,
         };
         const groups: IRNode[] = [];
-
+        const gradientsByRange = new Map<PdfLayerRange, IRNode>();
         for (const range of ranges) {
-          const children: IRNode[] = [];
-          try {
-            const vector = await pdfVectorNode(
-              pdfPage as unknown as Parameters<typeof pdfVectorNode>[0],
+          const gradient = pdfGradientNode(
+            pdfPage as unknown as Parameters<typeof pdfGradientNode>[0],
+            operatorList as unknown as PdfOperatorList,
+            range,
+            modernOps,
+            width,
+            height,
+          );
+          if (gradient) gradientsByRange.set(range, gradient);
+        }
+        const backgroundRange = gradientsByRange.keys().next().value as
+          | PdfLayerRange
+          | undefined;
+        const maskRange = ranges.find(
+          (range) =>
+            pdfImageSegments(
               operatorList as unknown as PdfOperatorList,
               range,
               modernOps,
-              width,
-              height,
-            );
-            if (vector) {
-              children.push(vector);
-              report.editableNodes += 1;
+            ).some(
+              (segment) =>
+                segment.hasSoftMask && segment.blendMode === "hard-light",
+            ),
+        );
+        const maskBackdrop =
+          backgroundRange && maskRange && backgroundRange.start < maskRange.start
+            ? await renderPdfRangeCanvas(
+                pdfPage as unknown as Parameters<typeof renderPdfRangeCanvas>[0],
+                [backgroundRange],
+                extractionOptionalContentConfigPromise,
+              )
+            : undefined;
+        const maskComposite =
+          backgroundRange && maskRange && maskBackdrop
+            ? await renderPdfRangeCanvas(
+                pdfPage as unknown as Parameters<typeof renderPdfRangeCanvas>[0],
+                [backgroundRange, maskRange],
+                extractionOptionalContentConfigPromise,
+              )
+            : undefined;
+        const maskOverlay =
+          maskBackdrop && maskComposite
+            ? transparentOverlayCanvas(maskBackdrop, maskComposite)
+            : undefined;
+
+        for (const range of ranges) {
+          const children: IRNode[] = [];
+          const gradient = gradientsByRange.get(range);
+          if (gradient) {
+            children.push(gradient);
+            report.editableNodes += 1;
+          } else {
+            try {
+              const vector = await pdfVectorNode(
+                pdfPage as unknown as Parameters<typeof pdfVectorNode>[0],
+                operatorList as unknown as PdfOperatorList,
+                range,
+                modernOps,
+                width,
+                height,
+              );
+              if (vector) {
+                children.push(vector);
+                report.editableNodes += 1;
+              }
+            } catch (error) {
+              report.items.push({
+                level: "warning",
+                code: "AI_PDF_VECTOR_LAYER_FAILED",
+                message:
+                  error instanceof Error
+                    ? `The vector portion of this layer could not be converted: ${error.message}`
+                    : "The vector portion of this layer could not be converted.",
+                nodeName: range.name,
+              });
             }
-          } catch (error) {
-            report.items.push({
-              level: "warning",
-              code: "AI_PDF_VECTOR_LAYER_FAILED",
-              message:
-                error instanceof Error
-                  ? `The vector portion of this layer could not be converted: ${error.message}`
-                  : "The vector portion of this layer could not be converted.",
-              nodeName: range.name,
-            });
           }
           children.push(
             ...(await renderPdfImageLayers(
@@ -2078,6 +2818,9 @@ async function parsePdfHierarchy(
               modernOps,
               assets,
               context,
+              extractionOptionalContentConfigPromise,
+              range === maskRange ? maskBackdrop : undefined,
+              range === maskRange ? maskOverlay : undefined,
             )),
           );
           children.push(
@@ -2090,26 +2833,23 @@ async function parsePdfHierarchy(
           );
           if (children.length === 0) {
             report.items.push({
-              level: "warning",
-              code: "AI_EMPTY_GROUP_OMITTED",
+              level: "info",
+              code: "AI_EMPTY_LAYER_PRESERVED",
               message:
-                "This source layer is empty. Figma does not support empty Group nodes, so no placeholder layer was added.",
+                "This source layer has no visible PDF objects and was preserved as an editable empty Figma frame.",
               nodeName: range.name,
             });
-            continue;
           }
           report.editableNodes += 1;
-          groups.push({
-            id: createId("ai-layer"),
-            name: range.name,
-            type: "group",
-            x: 0,
-            y: 0,
-            width,
-            height,
-            childCoordinateSpace: "page",
-            children,
-          });
+          groups.push(pdfLayerNode(range, width, height, children));
+        }
+        if (maskBackdrop) {
+          maskBackdrop.width = 1;
+          maskBackdrop.height = 1;
+        }
+        if (maskComposite) {
+          maskComposite.width = 1;
+          maskComposite.height = 1;
         }
 
         pages.push({
@@ -2162,6 +2902,9 @@ async function parsePdfFallback(
   options: ParseOptions,
   callbacks: IllustratorParseCallbacks,
 ): Promise<IRDocument> {
+  if (options.textMode === "visual") {
+    return parsePdfRasterFallback(source, sourceName, options, callbacks);
+  }
   const hierarchy = await parsePdfHierarchy(source, sourceName, callbacks);
   if (hierarchy) return hierarchy;
   return parsePdfRasterFallback(source, sourceName, options, callbacks);

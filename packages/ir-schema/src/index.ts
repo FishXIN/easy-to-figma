@@ -35,7 +35,21 @@ export interface ImagePaint {
   filters?: ImageFilterValues;
 }
 
-export type Paint = SolidPaint | ImagePaint;
+export interface GradientStop {
+  position: number;
+  color: Color;
+}
+
+export interface GradientPaint {
+  type: "gradient";
+  gradientType: "linear" | "radial";
+  stops: GradientStop[];
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+  opacity?: number;
+}
+
+export type Paint = SolidPaint | ImagePaint | GradientPaint;
 
 export interface ImageFilterValues {
   exposure?: number;
@@ -105,6 +119,7 @@ export interface TextStyleRun {
   fontFamily?: string;
   fontStyle?: string;
   fontSize?: number;
+  lineHeight?: number | "auto";
   letterSpacing?: number;
   textDecoration?: "none" | "underline" | "strikethrough";
   fills?: Paint[];

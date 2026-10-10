@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-11
+
+### Fixed / 修复
+
+- Preserved hidden Illustrator PDF layers as hidden editable Figma layers, including named empty layers / 将 Illustrator PDF 隐藏图层保留为 Figma 中默认隐藏的可编辑图层，包含具名空图层
+- Removed duplicate visible empty OCG placeholders, grouped SVG implementation nodes under their source layer, and locked full-artboard visual background layers so canvas clicks reach editable foreground groups such as `Logo` / 移除重复的可见空 OCG 占位层，将 SVG 实现节点收纳到源图层下，并默认锁定整画板视觉背景层，使画布点击可直接命中 `Logo` 等前景可编辑组
+- Merged wrapped PDF lines from the same paragraph into one editable text node while preserving line breaks, alignment, and line height / 将同一段落的 PDF 换行内容合并为一个可编辑文本框，并保留换行、对齐与行距
+- Restored editable AI background gradients, outer image-group blend modes such as Multiply, and soft-mask Hard Light output without merging `BG_Color` and `BG_Mask` into one image / 恢复 AI 可编辑背景渐变、正片叠底等外层图像组混合模式，并以独立透明增量层还原柔光蒙版，未将 `BG_Color` 与 `BG_Mask` 合并为整图
+- Automatically resolved installed fonts when the source PostScript family maps to a localized family name, or when the installed face uses a non-standard style label, while keeping the manual replacement panel for genuinely unavailable fonts / 当源 PostScript 字体族对应本地化家族名，或已安装字体使用非标准 style 名时自动匹配；真正缺失的字体仍保留手动替换面板
+- Added verified aliases for `BiaoXiaoZhiLongZhuTi-J` / `标小智龙珠体 简` and `SXSGYS` / `苏新诗古印宋简` / 新增 `BiaoXiaoZhiLongZhuTi-J` / `标小智龙珠体 简` 与 `SXSGYS` / `苏新诗古印宋简` 的已验证别名映射
+
+### Verified / 验证
+
+- Re-imported the 909 MB `傩灵启示录_Display_BG.ai`: pages 1–2 retain their dark composited backgrounds, pages 3–6 remain transparent, hidden Reference layers stay hidden without duplicate placeholders, the multi-line link paragraph is one text layer, and clicking the emblem selects `Logo` / 重新导入 909 MB `傩灵启示录_Display_BG.ai`：第 1–2 页保持深色合成背景，第 3–6 页保持透明，隐藏 Reference 图层默认隐藏且无重复占位，多行链接段落为单一文本层，点击徽标可直接选中 `Logo`
+- Added regressions for optional-content visibility, wrapped paragraphs, gradients, inherited group blend modes, soft masks, and installed font aliases / 新增可选内容可见性、换行段落、渐变、外层组混合模式、软蒙版与已安装字体别名的回归测试
+- Full typecheck, unit-test suite, production build, and dependency audit pass with zero known vulnerabilities / 全量类型检查、单元测试、生产构建与依赖审计通过，已知漏洞为零
+
 ## [0.1.4] - 2026-10-09
 
 ### Added / 新增
@@ -106,7 +123,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Unit tests, type checking, production build, and dependency security checks
 - Bilingual project documentation and community health files
 
-[Unreleased]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/FishXIN/easy-to-figma/compare/v0.1.1...v0.1.2
